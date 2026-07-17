@@ -1,0 +1,32 @@
+# Daily enrichment refresh (v1.5 T3, SPEC section 9).
+# Runs merge.py and commits enrichment.json only when it changed. The live
+# site fetches the file from raw.githubusercontent.com on every load, so a
+# data refresh needs no deploy. 10:20 UTC = after NYC Open Data's overnight
+# dataset refresh, before NYC lunch traffic.
+name: merge
+on:
+  schedule:
+    - cron: '20 10 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python merge.py
+      - name: commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add enrichment.json
+          if git diff --cached --quiet; then
+            echo "enrichment.json unchanged - nothing to commit"
+          else
+            git commit -m "data: enrichment refresh $(date -u +%F)"
+            git push
+          fi
