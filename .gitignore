@@ -1,0 +1,16 @@
+# Internal working docs — stay local; a README ships at the very end (user call 2026-07-17)
+PRD.md
+SPEC.md
+BUILD-LOG.md
+HANDOFF.md
+
+# Personal Claude Code settings (machine-local permissions)
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+
+# OS noise
+.DS_Store
+Thumbs.db

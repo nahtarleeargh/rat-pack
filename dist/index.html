@@ -1,0 +1,1807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NYC Restaurant Inspection Map</title>
+<!-- V4 link-preview card. Site-wide, not per-restaurant: scrapers don't run JS,
+     and there's no backend to serve per-camis HTML (documented limit, SPEC §7 V4). -->
+<meta name="description" content="Look up any NYC restaurant's health grade, inspection score, and full violation history, on a map. Live city data.">
+<meta property="og:title" content="Rat Pack: NYC restaurant grades, mapped">
+<meta property="og:description" content="Look up any NYC restaurant's health grade, inspection score, and full violation history, on a map. Live city data.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://rat-pack.netlify.app/">
+<meta property="og:image" content="https://rat-pack.netlify.app/og.png">
+<meta name="twitter:card" content="summary">
+<meta name="theme-color" content="#1a9850">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  :root {
+    --grade-a: #1a9850;
+    --grade-b: #e6a817;
+    --grade-c: #d73027;
+    --grade-none: #8a8a8a;
+    --reopened: #b45309;   /* past closure, since re-opened — dashed amber ring */
+    --stack-mixed: #5b6573; /* several places, mixed grades — cool slate, deliberately no grade hue */
+    --ui-bg: #ffffff;
+    --ui-shadow: 0 2px 8px rgba(0,0,0,.25);
+  }
+  html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #map { position: absolute; inset: 0; }
+
+  /* --- floating search box (inert in T1, wired in T6) --- */
+  #search-wrap {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    z-index: 1000; width: min(420px, calc(100vw - 90px));
+  }
+  #search {
+    width: 100%; box-sizing: border-box; padding: 10px 14px;
+    border: none; border-radius: 8px; font-size: 15px;
+    background: var(--ui-bg); box-shadow: var(--ui-shadow);
+  }
+  #suggestions {
+    display: none;
+    margin-top: 6px; background: var(--ui-bg); border-radius: 8px;
+    box-shadow: var(--ui-shadow); overflow: hidden;
+    max-height: 55vh; overflow-y: auto;
+  }
+  #suggestions.open { display: block; }
+  .sugg {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; cursor: pointer; font-size: 13.5px;
+  }
+  .sugg:hover, .sugg.active { background: #f2f2f2; }
+  .sugg .sugg-text { min-width: 0; }
+  .sugg .sugg-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sugg .sugg-addr { color: #666; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sugg .mini-badge {
+    flex: none; margin-left: auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 24px; height: 24px; padding: 0 5px; border-radius: 6px;
+    color: #fff; font-weight: 700; font-size: 13px;
+  }
+  .sugg-empty { padding: 10px 12px; color: #666; font-size: 13px; }
+  .sugg-count {
+    position: sticky; bottom: 0; background: #fafafa; border-top: 1px solid #e5e5e5;
+    padding: 7px 12px; color: #666; font-size: 12px; font-weight: 600;
+  }
+  .closed-tag {
+    color: var(--grade-c); border: 1.5px solid var(--grade-c); border-radius: 4px;
+    font-size: 10px; font-weight: 700; padding: 0 4px; letter-spacing: .4px; vertical-align: 1px;
+  }
+  .reopened-tag {
+    color: var(--reopened); border: 1.5px solid var(--reopened); border-radius: 4px;
+    font-size: 10px; font-weight: 700; padding: 0 4px; letter-spacing: .4px; vertical-align: 1px;
+  }
+
+  /* --- stacked-dot chooser (U5b) --- */
+  .chooser-list { margin-top: 6px; }
+  .chooser-list .sugg { padding: 10px 4px; border-bottom: 1px solid #f0f0f0; }
+  .back-link {
+    color: #1d4ed8; text-decoration: underline; cursor: pointer;
+    font-size: 12.5px; margin: 0 0 8px; user-select: none;
+  }
+
+  /* --- selection pin --- */
+  .sel-pin { background: none; border: none; }
+  .sel-pin-inner {
+    animation: pin-drop .28s ease-out;
+    transform-origin: 50% 100%;
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,.35));
+  }
+  @keyframes pin-drop {
+    0%   { transform: translateY(-14px) scale(.8); opacity: 0; }
+    100% { transform: translateY(0) scale(1); opacity: 1; }
+  }
+
+  /* --- near-me button --- */
+  #nearme {
+    position: absolute; top: 12px; right: 12px; z-index: 1000;
+    border: none; border-radius: 8px; padding: 10px 12px;
+    background: var(--ui-bg); box-shadow: var(--ui-shadow);
+    font-size: 14px; cursor: pointer;
+  }
+  #nearme:active { background: #eee; }
+
+  /* --- legend --- */
+  #legend {
+    position: absolute; bottom: 24px; left: 12px; z-index: 1000;
+    background: var(--ui-bg); border-radius: 8px; box-shadow: var(--ui-shadow);
+    padding: 8px 12px; font-size: 13px; line-height: 1.9;
+  }
+  #legend .row { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  #legend .row.off { opacity: .35; }
+  #legend .dot {
+    width: 12px; height: 12px; border-radius: 50%; flex: none;
+  }
+
+  /* --- detail panel --- */
+  #panel {
+    display: none;
+    position: absolute; top: 0; right: 0; bottom: 0; z-index: 1100;
+    width: min(400px, 100vw); box-sizing: border-box;
+    background: var(--ui-bg); box-shadow: -2px 0 12px rgba(0,0,0,.2);
+    overflow-y: auto; padding: 16px;
+  }
+  #panel.open { display: block; }
+  #panel .close-btn, #explainer .close-btn {
+    position: absolute; top: 10px; right: 10px;
+    border: none; background: #eee; border-radius: 50%;
+    width: 30px; height: 30px; font-size: 15px; cursor: pointer;
+  }
+  /* V4: share sits left of ✕, never overlapping it */
+  #panel .share-btn {
+    position: absolute; top: 10px; right: 48px;
+    border: none; background: #eee; border-radius: 50%;
+    width: 30px; height: 30px; font-size: 14px; cursor: pointer;
+  }
+  #panel h2 { margin: 2px 24px 2px 0; font-size: 19px; }
+  #panel .sub { color: #555; font-size: 13px; margin: 2px 0; }
+  .grade-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 34px; height: 34px; padding: 0 8px; border-radius: 8px;
+    color: #fff; font-weight: 700; font-size: 18px;
+  }
+  .grade-line { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
+  .grade-note { font-size: 12.5px; color: #555; }
+  .grade-strip { display: flex; align-items: flex-start; gap: 4px; margin: 6px 0 2px; flex-wrap: wrap; }
+  .grade-strip .strip-item { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
+  .grade-strip .strip-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 20px; height: 20px; padding: 0 5px; border-radius: 5px;
+    color: #fff; font-weight: 700; font-size: 12px;
+  }
+  .grade-strip .strip-date { font-size: 9px; color: #a5a5a5; line-height: 1; letter-spacing: 0.2px; }
+  .grade-strip .strip-arrow { color: #999; font-size: 12px; line-height: 20px; }
+  .inspection {
+    border: 1px solid #e3e3e3; border-radius: 8px;
+    padding: 10px 12px; margin: 10px 0; font-size: 13.5px;
+  }
+  .inspection .insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .inspection .insp-date { font-weight: 600; }
+  .inspection .insp-type { color: #666; font-size: 12px; margin-top: 1px; }
+  .inspection .insp-meta { color: #444; font-size: 12.5px; margin-top: 3px; }
+  .inspection .insp-action { color: var(--grade-c); font-weight: 600; font-size: 12.5px; margin-top: 3px; }
+  .violation { margin: 8px 0 0; padding-left: 10px; border-left: 3px solid #ddd; }
+  .violation.critical { border-left-color: var(--grade-c); }
+  .violation .crit-tag {
+    color: var(--grade-c); font-weight: 700; font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: .3px;
+  }
+  .violation .v-icon { margin-right: 2px; }
+  .v-details { margin-top: 2px; }
+  .v-details summary {
+    color: #888; font-size: 11.5px; cursor: pointer; user-select: none;
+    list-style-position: inside;
+  }
+  .v-details summary:hover { color: #555; }
+  .v-legal { color: #555; font-size: 12px; margin-top: 3px; }
+  .panel-loading { color: #666; padding: 40px 0; text-align: center; }
+  .closed-banner {
+    background: var(--grade-c); color: #fff; font-weight: 600;
+    border-radius: 8px; padding: 10px 12px; margin: 0 24px 12px 0; font-size: 13.5px;
+  }
+  .reopened-banner {
+    background: var(--reopened); color: #fff; font-weight: 600;
+    border-radius: 8px; padding: 10px 12px; margin: 0 24px 12px 0; font-size: 13.5px;
+  }
+
+  /* --- error banner --- */
+  #error-banner {
+    display: none;
+    position: absolute; top: 0; left: 0; right: 0; z-index: 1200;
+    background: #b3261e; color: #fff; padding: 10px 16px; font-size: 14px;
+    align-items: center; gap: 12px;
+  }
+  #error-banner.show { display: flex; }
+  #error-banner .retry-btn {
+    border: 1.5px solid #fff; background: transparent; color: #fff;
+    border-radius: 6px; padding: 4px 12px; font-size: 13px; cursor: pointer;
+    flex: none; margin-left: auto;
+  }
+  #error-banner .retry-btn:active { background: rgba(255,255,255,.2); }
+
+  /* --- grade explainer overlay --- */
+  #explainer-backdrop {
+    display: none;
+    position: absolute; inset: 0; z-index: 1300;
+    background: rgba(0,0,0,.45);
+  }
+  #explainer-backdrop.open { display: flex; align-items: center; justify-content: center; }
+  #explainer {
+    position: relative;
+    background: var(--ui-bg); border-radius: 12px; box-shadow: var(--ui-shadow);
+    max-width: 480px; width: calc(100vw - 40px); max-height: 80vh; overflow-y: auto;
+    padding: 20px 22px; font-size: 14px; line-height: 1.5;
+  }
+  #explainer h2 { margin: 0 24px 10px 0; font-size: 18px; }
+  #explainer p { margin: 10px 0; }
+  #explainer .source-note { color: #666; font-size: 12.5px; }
+  #legend .explainer-link {
+    color: #1d4ed8; text-decoration: underline; font-size: 12.5px; margin-top: 2px;
+  }
+
+  /* --- welcome popup (V1) --- */
+  #welcome-backdrop {
+    display: none;
+    position: absolute; inset: 0; z-index: 1400; /* above panel + explainer */
+    background: rgba(0,0,0,.45);
+  }
+  #welcome-backdrop.open { display: flex; align-items: center; justify-content: center; }
+  #welcome {
+    background: var(--ui-bg); border-radius: 14px; box-shadow: var(--ui-shadow);
+    max-width: 440px; width: calc(100vw - 40px); max-height: 85vh; overflow-y: auto;
+    padding: 22px 24px; font-size: 14px; line-height: 1.55; text-align: left;
+  }
+  #welcome .welcome-rat { font-size: 46px; text-align: center; line-height: 1; }
+  #welcome h2 { margin: 8px 0 10px; font-size: 20px; text-align: center; }
+  #welcome p { margin: 10px 0; }
+  #welcome .welcome-link { color: #1d4ed8; text-decoration: underline; cursor: pointer; }
+  #welcome-dismiss {
+    display: block; width: 100%; margin-top: 14px;
+    border: none; border-radius: 8px; padding: 11px 0;
+    background: var(--grade-a); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  #welcome-dismiss:active { filter: brightness(.92); }
+
+  /* --- map hint (used from T3 for the zoom gate) --- */
+  #map-hint {
+    display: none;
+    position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
+    z-index: 1000; background: rgba(30,30,30,.85); color: #fff;
+    padding: 6px 14px; border-radius: 16px; font-size: 13px; pointer-events: none;
+  }
+
+  /* --- phone-sized screens: panel becomes a bottom sheet --- */
+  @media (max-width: 700px) {
+    #panel {
+      top: auto; left: 0; right: 0; bottom: 0;
+      width: 100vw; height: 62vh;
+      border-radius: 14px 14px 0 0; box-shadow: 0 -2px 12px rgba(0,0,0,.25);
+    }
+    #nearme { top: auto; bottom: 24px; right: 12px; } /* thumb reach; clears the search bar */
+    #search-wrap { width: calc(100vw - 70px); left: 58px; transform: none; }
+    #legend { font-size: 12px; line-height: 1.7; padding: 6px 10px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="search-wrap">
+  <input id="search" type="search" placeholder="Search restaurants by name…" autocomplete="off">
+  <div id="suggestions"></div>
+</div>
+
+<div id="legend" title="Tap a grade to show only those restaurants">
+  <div class="row" data-states="A"><span class="dot" style="background:var(--grade-a)"></span>A</div>
+  <div class="row" data-states="B"><span class="dot" style="background:var(--grade-b)"></span>B</div>
+  <div class="row" data-states="C"><span class="dot" style="background:var(--grade-c)"></span>C</div>
+  <div class="row" data-states="PENDING,NONE"><span class="dot" style="background:var(--grade-none)"></span>Grade pending / none</div>
+  <div class="row" data-states="NEVER"><span class="dot" style="background:#fff;border:2px solid var(--grade-none);width:9px;height:9px"></span>Not yet inspected</div>
+  <div class="row"><span class="dot" style="background:var(--stack-mixed)"></span>Several places, mixed grades</div>
+  <div class="row"><span class="dot" style="background:transparent;border:2.5px solid var(--grade-c);width:8px;height:8px"></span>Closed by Health Dept</div>
+  <div class="row"><span class="dot" style="background:transparent;border:2.5px dashed var(--reopened);width:8px;height:8px"></span>Closed in the past, re-opened</div>
+  <div class="row explainer-link" id="explainer-link">What do grades mean?</div>
+</div>
+
+<div id="explainer-backdrop">
+  <div id="explainer">
+    <button class="close-btn" aria-label="Close">✕</button>
+    <h2>What do these grades mean?</h2>
+    <p>New York City's Health Department inspects every permitted restaurant, unannounced,
+       at least once a year. Inspectors assign points for violations — <strong>fewer points is
+       better</strong>. Roughly: 0–13 points earns an <strong>A</strong>, 14–27 a
+       <strong>B</strong>, 28 or more a <strong>C</strong>.</p>
+    <p><strong>Grade pending</strong> means the restaurant scored poorly on an initial
+       inspection and is awaiting the re-inspection that sets its letter — it is not a failing
+       grade. Some inspection types (administrative, pre-permit) never produce a grade at all.</p>
+    <p><strong>Not yet inspected</strong> means the city's dataset shows no inspection on
+       record — common for newly permitted restaurants.</p>
+    <p class="source-note">Source: NYC Open Data, “DOHMH New York City Restaurant Inspection
+       Results,” updated daily by the city. This site queries it live and shows it faithfully.</p>
+  </div>
+</div>
+
+<div id="welcome-backdrop">
+  <div id="welcome">
+    <div class="welcome-rat">🐀</div>
+    <h2>Welcome to Rat Pack</h2>
+    <p>NYC inspects every restaurant and publishes the results. This map shows all of it:
+       every grade, every violation, updated daily from the city&rsquo;s data.</p>
+    <p><strong>Before you panic:</strong> this is New York. Most kitchens have seen a fly
+       or two. An <strong>A</strong> doesn&rsquo;t mean spotless, and a pending grade
+       isn&rsquo;t a bad sign. The thing to actually avoid is a
+       <strong style="color:var(--grade-c)">red ring</strong>. That means the Health
+       Department shut the place down.</p>
+    <p><strong>Tap any dot</strong> to see what the inspector found.
+       <span class="welcome-link" id="welcome-explainer-link">What do the grades mean?</span></p>
+    <button id="welcome-dismiss">Show me the dots</button>
+  </div>
+</div>
+
+<button id="nearme" title="Center the map on your location">📍 Near me</button>
+
+<div id="panel"></div>
+<div id="error-banner"></div>
+<div id="map-hint"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+'use strict';
+
+// ================= config =================
+const API = 'https://data.cityofnewyork.us/resource/43nn-pn8j.json';
+const APP_TOKEN = '';            // optional Socrata app token; only needed if 429s appear
+const PIN_ZOOM_GATE = 15;        // below this zoom we don't fetch pins (viewport mode only)
+const PIN_RESTAURANT_LIMIT = 2000;  // grouped rows (one per restaurant) per viewport fetch
+const PIN_GRADE_ROW_LIMIT = 10000;  // (camis,grade) grouped rows — tiny, effectively never caps
+const CITY_RESTAURANT_LIMIT = 50000;   // full-city cache: all ~31k restaurants
+const CITY_GRADE_ROW_LIMIT = 100000;   // full-city cache: all (camis,grade) combos
+const FETCH_TIMEOUT_MS = 10000;
+const CITY_FETCH_TIMEOUT_MS = 30000;   // the big background fetch gets more patience
+const SENTINEL_NEVER = '1900-01-01T00:00:00.000';
+
+const GRADE_STATES = {
+  A:       { label: 'A',                 color: 'var(--grade-a)' },
+  B:       { label: 'B',                 color: 'var(--grade-b)' },
+  C:       { label: 'C',                 color: 'var(--grade-c)' },
+  PENDING: { label: 'Grade pending',     color: 'var(--grade-none)' },
+  NONE:    { label: 'No grade',          color: 'var(--grade-none)' },
+  NEVER:   { label: 'Not yet inspected', color: 'var(--grade-none)' },
+};
+
+// Citywide median inspection score (V3), measured 2026-07-17: last 12 months of
+// letter-graded (A/B/C) cycle inspections, one row per inspection via
+// $group=camis,inspection_date,score — 13,404 inspections, median 11, quartiles 8–13.
+// Re-measure at each version sweep; it drifts slowly.
+const CITY_MEDIAN_SCORE = 11;
+
+// legend-filter state (which grade states are visible) — declared up here because
+// the dot renderer reads it on its very first draw
+const activeStates = new Set(Object.keys(GRADE_STATES));
+
+// V2: plain-English glosses for the most common violation codes (top 35 by row
+// count = 94.7% of all violation rows, measured 2026-07-17). Each restates the
+// official description in plain words — no severity language the data doesn't
+// contain. Codes outside this dictionary render with their raw text unchanged.
+// Categories: 🐀 pests · 🌡️ temperature · 🧼 hygiene · 📋 paperwork · 🔧 facility,
+// plus one-off literal icons where the category icon didn't match the flag
+// (🪳 roaches, 🪰 flies, 🚚 food source, 🦠 contamination, 🚬 smoking/eating,
+// 🗑️ garbage, 🧪 chemicals — user call 2026-07-17).
+// NOTE: 04K = rats, 04L = MICE (verified against per-code description counts —
+// a lone bad data row makes max() lie about 04L).
+const VIOLATION_GLOSSES = {
+  '02B':   { icon: '🌡️', gloss: 'Hot food kept too cool' },
+  '02G':   { icon: '🌡️', gloss: 'Cold food kept too warm' },
+  '02H':   { icon: '🌡️', gloss: 'Cooked food not cooled down fast enough' },
+  '03A':   { icon: '🚚', gloss: 'Food from an unapproved or home source' },
+  '04A':   { icon: '📋', gloss: 'Supervisor lacks a Food Protection Certificate' },
+  '04H':   { icon: '🦠', gloss: 'Food contaminated or cross-contaminated' },
+  '04J':   { icon: '🌡️', gloss: 'No proper thermometer for checking food' },
+  '04K':   { icon: '🐀', gloss: 'Rats seen in the establishment' },
+  '04L':   { icon: '🐀', gloss: 'Mice seen in the establishment' },
+  '04M':   { icon: '🪳', gloss: 'Live roaches present' },
+  '04N':   { icon: '🪰', gloss: 'Flies or other nuisance pests present' },
+  '05D':   { icon: '🧼', gloss: 'No handwashing sink where required' },
+  '05H':   { icon: '📋', gloss: 'Missing written procedures for reusable containers' },
+  '06A':   { icon: '🧼', gloss: 'Staff hygiene: soiled clothing or no hair covering' },
+  '06B':   { icon: '🚬', gloss: 'Eating, drinking, or tobacco in the prep area' },
+  '06C':   { icon: '🧼', gloss: 'Food not protected from contamination' },
+  '06D':   { icon: '🧼', gloss: 'Surfaces not washed and sanitized between uses' },
+  '06E':   { icon: '🧼', gloss: 'Clean utensils stored or used improperly' },
+  '06F':   { icon: '🧼', gloss: 'Dirty wiping cloths' },
+  '08A':   { icon: '🐀', gloss: 'Conditions that let vermin in or nest' },
+  '08B':   { icon: '🗑️', gloss: 'Garbage bins not pest-proof or clean' },
+  '08C':   { icon: '🧪', gloss: 'Pesticide or chemical misuse' },
+  '09B':   { icon: '🌡️', gloss: 'Food thawed improperly' },
+  '09C':   { icon: '🔧', gloss: 'Food-contact surface in poor repair' },
+  '09E':   { icon: '📋', gloss: '“Wash hands” sign not posted' },
+  '10B':   { icon: '🔧', gloss: 'Plumbing or drainage problems' },
+  '10D':   { icon: '🔧', gloss: 'Ventilation missing or in disrepair' },
+  '10E':   { icon: '🌡️', gloss: 'No thermometer in fridge or hot-holding unit' },
+  '10F':   { icon: '🧼', gloss: 'Non-food surfaces dirty or hard to clean' },
+  '10G':   { icon: '🔧', gloss: 'Non-food surfaces badly built or maintained' },
+  '10H':   { icon: '🧼', gloss: 'Disposable items reused or left unprotected' },
+  '20-04': { icon: '📋', gloss: 'Required safety posters missing' },
+  '20-06': { icon: '📋', gloss: 'Grade card not posted' },
+  '20-08': { icon: '📋', gloss: 'Healthy-eating info not posted' },
+  '28-06': { icon: '📋', gloss: 'No pest-control contract or records' },
+  // ---- Long-tail codes (added 2026-07-17): every code in the dataset now has a
+  // plain-English gloss so no row falls back to raw legalese. Icons only where an
+  // obvious one exists; entries without an icon render text-only.
+  '02A':   { icon: '🌡️', gloss: 'Food not cooked to the required temperature' },
+  '02C':   { icon: '🌡️', gloss: 'Cooked and cooled food not reheated hot enough' },
+  '02D':   { icon: '🌡️', gloss: 'Pre-cooked packaged food not kept refrigerated' },
+  '02F':   { gloss: 'Raw or undercooked food served without written notice' },
+  '02I':   { icon: '🌡️', gloss: 'Room-temperature food not chilled fast enough' },
+  '03B':   { gloss: 'Shellfish untagged or from an unapproved source' },
+  '03C':   { icon: '🥚', gloss: 'Cracked or unpasteurized eggs kept or used' },
+  '03D':   { icon: '🥫', gloss: 'Damaged food package unfit for consumption' },
+  '03E':   { icon: '🚰', gloss: 'Water supply not drinkable or unapproved' },
+  '03F':   { icon: '🥛', gloss: 'Unpasteurized milk or milk product served' },
+  '03G':   { gloss: 'Raw produce not washed before serving' },
+  '03I':   { gloss: 'House-packaged juice missing label or warning' },
+  '04B':   { gloss: 'Worker on duty with open wound or reportable illness' },
+  '04C':   { icon: '🧤', gloss: 'Bare-hand contact with ready-to-eat food' },
+  '04D':   { icon: '🧼', gloss: 'Worker did not wash hands when required' },
+  '04E':   { icon: '🧪', gloss: 'Toxic chemicals stored where food could be contaminated' },
+  '04F':   { gloss: 'Food area contaminated by sewage or liquid waste' },
+  '04I':   { gloss: 'Previously served food served again' },
+  '04O':   { icon: '🐾', gloss: 'Live animal in the facility (not a service animal)' },
+  '04P':   { gloss: 'Food containing a prohibited substance' },
+  '05A':   { icon: '🔧', gloss: 'Sewage disposal system missing or inadequate' },
+  '05B':   { gloss: 'Carbon monoxide or other harmful gas detected' },
+  '05C':   { icon: '🔧', gloss: 'Food equipment badly built, placed, or maintained' },
+  '05E':   { icon: '🚽', gloss: 'Required toilet missing or improperly located' },
+  '05F':   { icon: '🌡️', gloss: 'Not enough hot or cold holding equipment' },
+  '05I':   { icon: '🌡️', gloss: 'Safety-plan fridge lacks continuous temperature monitor' },
+  '06G':   { icon: '📋', gloss: 'Food-safety (HACCP) plan not approved or on site' },
+  '06H':   { icon: '📋', gloss: 'Food-safety (HACCP) plan records not maintained' },
+  '06I':   { icon: '📋', gloss: 'Food not labeled per the safety plan' },
+  '07A':   { gloss: 'Health inspector interfered with or obstructed' },
+  '09A':   { icon: '🥫', gloss: 'Damaged canned food not set aside and labeled' },
+  '09D':   { icon: '🛏️', gloss: 'Food prepared in living or sleeping quarters' },
+  '10A':   { icon: '🚽', gloss: 'Toilet not maintained or missing supplies' },
+  '10C':   { icon: '💡', gloss: 'Inadequate lighting in food or storage areas' },
+  '10I':   { gloss: 'Single-use items reused or badly stored' },
+  '10J':   { icon: '📋', gloss: 'Hand-washing sign not posted' },
+  '10K':   { gloss: 'Improper dishwashing setup or technique' },
+  '10M':   { icon: '📋', gloss: 'Hand-washing sign not posted at sink' },
+  '15-01': { icon: '🚬', gloss: 'Smoking allowed in a prohibited area' },
+  '15-17': { icon: '🚬', gloss: 'Tobacco or smoking products sold to minors' },
+  '15-21': { icon: '🚬', gloss: 'Flavored tobacco products for sale' },
+  '15-22': { icon: '🚬', gloss: 'Tobacco products missing original labels' },
+  '15-26': { icon: '🚬', gloss: 'No-smoking sign missing where ashtrays present' },
+  '15-27': { icon: '🚬', gloss: 'No-smoking sign not posted' },
+  '15-32': { icon: '🚬', gloss: 'Hookah warning sign not posted at entry' },
+  '15-33': { icon: '🚬', gloss: 'Hookah warning sign not posted in smoking areas' },
+  '15-36': { icon: '🚬', gloss: 'Under-21 entry sign not posted at hookah bar' },
+  '15-37': { icon: '🚬', gloss: 'Workplace smoking policy not posted' },
+  '15-39': { icon: '🚬', gloss: 'Ashtray present in smoke-free area' },
+  '15-42': { icon: '🚬', gloss: 'No real effort made to stop smoking on site' },
+  '15A1':  { icon: '🚬', gloss: 'Smoking in a prohibited area' },
+  '15E2':  { icon: '🚬', gloss: 'Flavored tobacco products for sale' },
+  '15F1':  { icon: '🚬', gloss: 'Ashtrays in smoke-free area' },
+  '15F2':  { icon: '🚬', gloss: 'No real effort made to stop smoking on site' },
+  '15F6':  { icon: '🚬', gloss: 'Workplace smoking policy not posted' },
+  '15F7':  { icon: '🚬', gloss: 'No-smoking sign not posted' },
+  '15I':   { icon: '🚬', gloss: 'Smoking signage missing or incomplete' },
+  '15K':   { icon: '🚬', gloss: 'No real effort made to stop smoking on site' },
+  '15L':   { icon: '🚬', gloss: 'Workplace smoking policy inadequate or not posted' },
+  '15S':   { icon: '🚬', gloss: 'Flavored tobacco products for sale' },
+  '16-01': { gloss: 'Food with artificial trans fat in use' },
+  '16-02': { icon: '📋', gloss: 'Nutrition or ingredient labels not available' },
+  '16-03': { icon: '📋', gloss: 'Calorie counts not posted on menus' },
+  '16-04': { icon: '📋', gloss: 'Daily-calorie guideline statement not on menus' },
+  '16-06': { icon: '📋', gloss: 'Extra nutrition info not posted or provided' },
+  '16-08': { icon: '🧂', gloss: 'Sodium warning icon missing from menu' },
+  '16-09': { icon: '🧂', gloss: 'Sodium warning icon wrong shape or color' },
+  '16-10': { icon: '🧂', gloss: 'Sodium warning statement not posted' },
+  '16-11': { gloss: 'Prohibited drink listed on the kids menu' },
+  '16A':   { gloss: 'Cooking fat contains artificial trans fat' },
+  '16B':   { icon: '📋', gloss: 'Nutrition or ingredient labels not available' },
+  '16C':   { icon: '📋', gloss: 'Calorie information missing or posted wrong' },
+  '16D':   { icon: '📋', gloss: 'Daily-calorie guideline statement not posted' },
+  '16E':   { icon: '📋', gloss: 'Extra nutrition info not posted or provided' },
+  '16J':   { icon: '🧂', gloss: 'Sodium warning icon not posted' },
+  '16K':   { icon: '🧂', gloss: 'Sodium warning icon not compliant' },
+  '16L':   { icon: '🧂', gloss: 'Sodium warning statement not posted' },
+  '18-01': { icon: '📋', gloss: 'Valid permit not available for inspection' },
+  '18-08': { icon: '📋', gloss: 'Permit not conspicuously displayed' },
+  '18-11': { icon: '📋', gloss: 'Food Protection Certificate not available' },
+  '18-12': { icon: '📋', gloss: 'Health Department documents altered or falsified' },
+  '18-13': { icon: '📋', gloss: 'Failure to comply with a Department order' },
+  '18-14': { icon: '📋', gloss: 'Posted Department notice damaged or removed' },
+  '18B':   { icon: '📋', gloss: 'Department document unlawfully reproduced or altered' },
+  '18C':   { icon: '📋', gloss: 'Posted Department notice damaged or removed' },
+  '18D':   { icon: '📋', gloss: 'Failure to comply with a Department order' },
+  '18F':   { icon: '📋', gloss: 'Permit not conspicuously displayed' },
+  '18G':   { icon: '🥛', gloss: 'Unauthorized frozen dessert or expired milk product' },
+  '18I':   { icon: '📋', gloss: 'Required health and safety posters missing' },
+  '19-01': { icon: '♻️', gloss: 'Organics mixed with regular trash' },
+  '19-02': { icon: '♻️', gloss: 'Organics containers not labeled' },
+  '19-03': { icon: '📋', gloss: 'Signage missing in organics collection area' },
+  '19-04': { icon: '♻️', gloss: 'Foam containers not marked recyclable' },
+  '19-05': { icon: '🥤', gloss: 'Single-use plastic stirrers or splash sticks provided' },
+  '19-06': { icon: '🥤', gloss: 'Plastic straws handed out without being asked' },
+  '19-07': { icon: '🥤', gloss: 'No plastic straws in stock for those who ask' },
+  '19-08': { icon: '🥤', gloss: 'Plastic straw not provided when requested' },
+  '19-10': { icon: '📋', gloss: 'Straw-availability sign not displayed' },
+  '19-11': { icon: '🥤', gloss: 'Compostable plastic straws misused or mishandled' },
+  '20-01': { icon: '📋', gloss: 'Allergen notice not translated as required' },
+  '20-02': { icon: '📋', gloss: 'Link to inspection lookup tool not posted' },
+  '20-03': { icon: '📋', gloss: 'Food allergy poster not Department approved' },
+  '20-05': { icon: '📋', gloss: 'Grade card not visible to passersby' },
+  '20-07': { icon: '📋', gloss: 'Grade card removed, altered, or tampered with' },
+  '20A':   { icon: '📋', gloss: 'Food allergy poster not displayed' },
+  '20D':   { icon: '📋', gloss: 'Required health and safety posters missing' },
+  '20E':   { icon: '📋', gloss: 'Grade card not visible to passersby' },
+  '20F':   { icon: '📋', gloss: 'Letter grade sign not posted' },
+  '22A':   { gloss: 'Unsafe or offensive nuisance conditions' },
+  '22B':   { icon: '🚽', gloss: 'Toilet lacks a covered garbage bin' },
+  '22C':   { icon: '💡', gloss: 'Bulb not shielded or shatterproof' },
+  '22E':   { gloss: 'Vacuum-packing equipment not approved' },
+  '22F':   { gloss: 'Food misbranded or mislabeled' },
+  '22G':   { gloss: 'Restricted foam items sold or used' },
+  '28-01': { gloss: 'Unsafe or offensive nuisance conditions' },
+  '28-03': { icon: '💡', gloss: 'Unshielded lighting over food or utensil areas' },
+  '28-04': { gloss: 'Vacuum-packing equipment not approved' },
+  '28-05': { gloss: 'Food adulterated or misbranded' },
+  '28-07': { gloss: 'Unapproved outdoor or sidewalk cooking' },
+  '99B':   { gloss: 'Other general violation' },
+};
+
+// ================= helpers =================
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// SoQL string literal: escape single quotes
+function soqlStr(s) { return String(s).replace(/'/g, "''"); }
+
+// Address normalization for local search (U4). Applied identically to the cached
+// "building street" string and to the user's query, so either side may abbreviate:
+// uppercase, punctuation → space, ordinals stripped (1ST→1, matching the dataset's
+// "1 AVENUE" style), common abbreviations expanded (AVE→AVENUE, ST→STREET, E→EAST).
+const ADDR_ABBREV = {
+  AVE: 'AVENUE', AV: 'AVENUE', ST: 'STREET', BLVD: 'BOULEVARD', RD: 'ROAD',
+  DR: 'DRIVE', PL: 'PLACE', PKWY: 'PARKWAY', LN: 'LANE', CT: 'COURT',
+  TER: 'TERRACE', SQ: 'SQUARE', BWAY: 'BROADWAY', BDWY: 'BROADWAY',
+  E: 'EAST', W: 'WEST', N: 'NORTH', S: 'SOUTH',
+};
+function normAddr(s) {
+  return String(s).toUpperCase()
+    .replace(/[^A-Z0-9 ]+/g, ' ')
+    .split(/\s+/).filter(Boolean)
+    .map(w => {
+      const m = /^(\d+)(ST|ND|RD|TH)$/.exec(w);
+      return m ? m[1] : (ADDR_ABBREV[w] || w);
+    })
+    .join(' ');
+}
+
+function soqlUrl(params) {
+  const q = new URLSearchParams(params);
+  if (APP_TOKEN) q.set('$$app_token', APP_TOKEN);
+  return API + '?' + q.toString();
+}
+
+async function fetchRows(params, signal, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  if (signal) signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+  try {
+    const res = await fetch(soqlUrl(params), { signal: controller.signal });
+    if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function showError(msg, retryFn) {
+  const b = document.getElementById('error-banner');
+  b.innerHTML = `<span>${escapeHtml(msg)}</span>` +
+    (retryFn ? '<button class="retry-btn">Retry</button>' : '');
+  if (retryFn) b.querySelector('.retry-btn').addEventListener('click', () => { hideError(); retryFn(); });
+  b.classList.add('show');
+}
+function hideError() { document.getElementById('error-banner').classList.remove('show'); }
+
+// one message for every fetch failure; 429 gets its own wording
+function fetchErrorMessage(err) {
+  return err && err.status === 429
+    ? 'NYC’s data service says “too many requests” — give it a moment, then retry.'
+    : "Can't reach NYC's data service right now — the map may be showing older pins.";
+}
+
+function showHint(msg) {
+  const h = document.getElementById('map-hint');
+  h.textContent = msg;
+  h.style.display = 'block';
+}
+function hideHint() { document.getElementById('map-hint').style.display = 'none'; }
+
+// ================= grade normalization =================
+// "Current grade" = grade of the newest inspection that has one (many inspection
+// types never grade). Z/P/N are all "grade pending" — never shown as failing.
+function gradeState({ rawGrade, latestInspectionDate }) {
+  if (latestInspectionDate === SENTINEL_NEVER) return 'NEVER';
+  if (!rawGrade) return 'NONE';
+  if (['Z', 'P', 'N'].includes(rawGrade)) return 'PENDING';
+  if (['A', 'B', 'C'].includes(rawGrade)) return rawGrade;
+  return 'NONE'; // unknown code — be neutral
+}
+
+// ================= map bootstrap =================
+// U5: remember last view — device-only localStorage, consistent with the no-tracking
+// rule. A ?camis= deep link wins over the stored view (it will center its restaurant;
+// restoring a stale view first would just flash a wrong neighborhood).
+const LAST_VIEW_KEY = 'ratpack.lastView';
+const DEFAULT_VIEW = { center: [40.7295, -73.9880], zoom: 15 }; // East Village
+const deepLinkedCamis = (() => {
+  const c = new URLSearchParams(location.search).get('camis');
+  return c && /^\d{1,12}$/.test(c) ? c : null;
+})();
+function readLastView() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LAST_VIEW_KEY) || 'null');
+    if (v && Number.isFinite(v.lat) && Number.isFinite(v.lng) && Number.isFinite(v.zoom) &&
+        Math.abs(v.lat) <= 90 && Math.abs(v.lng) <= 180 && v.zoom >= 3 && v.zoom <= 20) return v;
+  } catch (e) { /* blocked or corrupted storage → default view */ }
+  return null;
+}
+const lastView = deepLinkedCamis ? null : readLastView();
+const map = L.map('map', { zoomControl: true }).setView(
+  lastView ? [lastView.lat, lastView.lng] : DEFAULT_VIEW.center,
+  lastView ? lastView.zoom : DEFAULT_VIEW.zoom
+);
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  maxZoom: 20,
+  subdomains: 'abcd',
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+}).addTo(map);
+
+// ---- custom batched dot renderer ----
+// 30k individual Leaflet CircleMarkers cost ~500 ms per canvas redraw (per-layer
+// overhead). This renderer draws the whole city in ONE batched path per grade
+// state (~20–40 ms) and subclasses L.Renderer, inheriting drag translation and
+// zoom animation for free. Dots live in stateBuckets, not as Leaflet layers.
+
+// Zoom-dependent dot style. Below z14 strokes go away and opacity drops so dense
+// areas read as a soft density field instead of merged blobs.
+function dotStyleForZoom(z) {
+  if (z >= 16) return { radius: 7,   weight: 1, fillOpacity: 0.9  };
+  if (z >= 14) return { radius: 5.5, weight: 1, fillOpacity: 0.9  };
+  if (z >= 13) return { radius: 4,   weight: 0, fillOpacity: 0.7  };
+  if (z >= 12) return { radius: 2.6, weight: 0, fillOpacity: 0.5  };
+  if (z >= 11) return { radius: 1.9, weight: 0, fillOpacity: 0.42 };
+  return              { radius: 1.4, weight: 0, fillOpacity: 0.38 };
+}
+
+let stateBuckets = {};    // grade state -> [restaurant, ...] with cached zoom-0 projections
+let selectedCamis = null; // read by the renderer's very first draw — must be declared before addTo(map)
+let stackList = [];       // U5b: arrays of restaurants sharing an EXACT geocode (≥2 members) —
+                          // read by the renderer's chip pass, so declared above it (landmine 4)
+
+const DotRenderer = L.Renderer.extend({
+  options: { padding: 0.5 },
+  _initContainer() {
+    this._container = document.createElement('canvas');
+    this._ctx = this._container.getContext('2d');
+  },
+  _update() {
+    L.Renderer.prototype._update.call(this);
+    const b = this._bounds;
+    const size = b.getSize();
+    const m = this._ctxScale = window.devicePixelRatio || 1;
+    if (this._container.width !== m * size.x || this._container.height !== m * size.y) {
+      this._container.width = m * size.x;
+      this._container.height = m * size.y;
+      this._container.style.width = size.x + 'px';
+      this._container.style.height = size.y + 'px';
+    }
+    L.DomUtil.setPosition(this._container, b.min);
+    // ctx works in layer coordinates from here on
+    this._ctx.setTransform(m, 0, 0, m, -b.min.x * m, -b.min.y * m);
+    this._draw();
+    this.fire('update');
+  },
+  requestRedraw() { if (this._map) this._update(); },
+  _draw() {
+    const ctx = this._ctx, b = this._bounds;
+    ctx.clearRect(b.min.x, b.min.y, b.max.x - b.min.x, b.max.y - b.min.y);
+    const zoom = this._map.getZoom();
+    const s = dotStyleForZoom(zoom);
+    const scale = Math.pow(2, zoom);           // zoom-0 px -> zoom-z px
+    const origin = this._map.getPixelOrigin(); // zoom-z px -> layer coords
+    const minX = b.min.x - s.radius, minY = b.min.y - s.radius;
+    const maxX = b.max.x + s.radius, maxY = b.max.y + s.radius;
+    const TWO_PI = Math.PI * 2;
+    // While something is selected, everything else dims — the selection pin owns focus.
+    const dim = selectedCamis ? 0.55 : 1;
+    // U5b: a stack (≥2 legend-visible members on one exact point) draws as ONE dot
+    // at EVERY zoom — mixed-grade stacks in neutral charcoal, never a color blend,
+    // and never a color that changes when the zoom crosses the count threshold
+    // (4 South Street must look the same at z15 as at z17, just without the count).
+    const STACK_R = s.radius + 3;
+    let stackDots = null; // stackArray -> {x, y, n, state|null (null = mixed)}
+    if (stackList.length) {
+      stackDots = new Map();
+      const pad = STACK_R + 2;
+      for (const members of stackList) {
+        const first = members[0];
+        const sx = first.__p0x * scale - origin.x;
+        const sy = first.__p0y * scale - origin.y;
+        if (sx < minX - pad || sx > maxX + pad || sy < minY - pad || sy > maxY + pad) continue;
+        let n = 0, uniform = null, mixed = false;
+        for (const m of members) {
+          if (!activeStates.has(m.state)) continue;
+          n++;
+          if (uniform === null) uniform = m.state;
+          else if (uniform !== m.state) mixed = true;
+        }
+        if (n < 2) continue; // filtered down to ≤1 visible member — draws as a normal dot
+        stackDots.set(members, { x: sx, y: sy, n, state: mixed ? null : uniform });
+      }
+    }
+    // grey states draw first (underneath); letter grades draw on top so dense
+    // areas read by grade color, not by whichever state happens to paint last
+    const DRAW_ORDER = ['NEVER', 'NONE', 'PENDING', 'A', 'B', 'C'];
+    for (const state of DRAW_ORDER) {
+      if (!activeStates.has(state)) continue;
+      const bucket = stateBuckets[state];
+      if (!bucket || !bucket.length) continue;
+      const isNever = state === 'NEVER';
+      const color = cssColor(GRADE_STATES[state].color);
+      ctx.beginPath();
+      for (const rest of bucket) {
+        if (rest.camis === selectedCamis) continue; // the pin replaces this dot
+        if (stackDots && rest.__stack && stackDots.has(rest.__stack)) continue; // stack draws as one dot
+        const x = rest.__p0x * scale - origin.x;
+        const y = rest.__p0y * scale - origin.y;
+        if (x < minX || x > maxX || y < minY || y > maxY) continue;
+        ctx.moveTo(x + s.radius, y);
+        ctx.arc(x, y, s.radius, 0, TWO_PI);
+      }
+      if (isNever && s.weight >= 1) {
+        // close zoom: hollow white ring (the legend's "not yet inspected" look)
+        ctx.globalAlpha = dim; ctx.fillStyle = '#ffffff'; ctx.fill();
+        ctx.lineWidth = s.weight * 2; ctx.strokeStyle = color; ctx.stroke();
+      } else if (isNever) {
+        // far zoom: quiet light-grey dot; hollow rings at 2px read as visual noise
+        ctx.globalAlpha = s.fillOpacity * 0.8 * dim; ctx.fillStyle = '#c0c0c0'; ctx.fill();
+      } else {
+        ctx.globalAlpha = s.fillOpacity * dim; ctx.fillStyle = color; ctx.fill();
+        if (s.weight) { ctx.globalAlpha = dim; ctx.lineWidth = s.weight; ctx.strokeStyle = color; ctx.stroke(); }
+      }
+    }
+    // U5b stack-dot pass: every on-screen stack draws as ONE dot in its
+    // zoom-consistent color (uniform → grade color, mixed → neutral charcoal).
+    // At z ≥ 16 the dot enlarges and carries its member count; below, it is a
+    // normal-size dot — same color, no count, no flip as the zoom crosses 16.
+    if (stackDots && stackDots.size) {
+      const r = zoom >= 16 ? STACK_R : s.radius;
+      const countable = zoom >= 16;
+      if (countable) {
+        ctx.font = '700 10px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+      }
+      for (const info of stackDots.values()) {
+        const isNeverU = info.state === 'NEVER'; // uniform never-inspected stack
+        const color = info.state ? cssColor(GRADE_STATES[info.state].color) : cssColor('var(--stack-mixed)');
+        ctx.beginPath();
+        ctx.arc(info.x, info.y, r, 0, TWO_PI);
+        if (isNeverU && s.weight >= 1) {
+          // match the hollow "not yet inspected" look at close zooms
+          ctx.globalAlpha = dim; ctx.fillStyle = '#ffffff'; ctx.fill();
+          ctx.lineWidth = s.weight * 2; ctx.strokeStyle = color; ctx.stroke();
+        } else {
+          // fully opaque at EVERY zoom — a stack dot's color is a statement
+          // (mixed / uniform grade) and must never blend with what's beneath it
+          ctx.globalAlpha = dim;
+          ctx.fillStyle = isNeverU ? '#c0c0c0' : color;
+          ctx.fill();
+          if (countable) { // white outline separates the enlarged disc from neighbors
+            ctx.lineWidth = 1.5; ctx.strokeStyle = '#ffffff'; ctx.stroke();
+          }
+        }
+        if (countable) {
+          ctx.fillStyle = isNeverU && s.weight >= 1 ? '#666666' : '#ffffff';
+          ctx.fillText(String(info.n), info.x, info.y + 0.5);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+    // ring radius per dot: enlarged stack discs (z ≥ 16) widen their rings to match
+    const baseGap = Math.max(2, s.radius * 0.45);
+    const ringRFor = rest =>
+      (zoom >= 16 && stackDots && rest.__stack && stackDots.has(rest.__stack) ? STACK_R : s.radius) + baseGap;
+    const maxRingR = STACK_R + baseGap;
+    // re-opened rings (closed by DOHMH in the past, open again now) draw beneath
+    // the closure pass: dashed amber, so the solid red "closed NOW" always wins.
+    ctx.beginPath();
+    for (const state of DRAW_ORDER) {
+      if (!activeStates.has(state)) continue;
+      const bucket = stateBuckets[state];
+      if (!bucket) continue;
+      for (const rest of bucket) {
+        if (!rest.reopenedDate || rest.isClosed || rest.camis === selectedCamis) continue;
+        const x = rest.__p0x * scale - origin.x;
+        const y = rest.__p0y * scale - origin.y;
+        if (x < minX - maxRingR || x > maxX + maxRingR || y < minY - maxRingR || y > maxY + maxRingR) continue;
+        const rr = ringRFor(rest);
+        ctx.moveTo(x + rr, y);
+        ctx.arc(x, y, rr, 0, TWO_PI);
+      }
+    }
+    ctx.globalAlpha = dim === 1 ? 0.9 : 0.6;
+    ctx.lineWidth = Math.max(1.25, s.radius * 0.3);
+    ctx.setLineDash([Math.max(2, maxRingR * 0.4), Math.max(2, maxRingR * 0.32)]);
+    ctx.strokeStyle = cssColor('var(--reopened)');
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // closure rings draw last, on top of everything — the highest-signal mark on
+    // the map. Full ring alpha at every zoom (closures must never fade out).
+    ctx.beginPath();
+    for (const state of DRAW_ORDER) {
+      if (!activeStates.has(state)) continue;
+      const bucket = stateBuckets[state];
+      if (!bucket) continue;
+      for (const rest of bucket) {
+        if (!rest.isClosed || rest.camis === selectedCamis) continue;
+        const x = rest.__p0x * scale - origin.x;
+        const y = rest.__p0y * scale - origin.y;
+        if (x < minX - maxRingR || x > maxX + maxRingR || y < minY - maxRingR || y > maxY + maxRingR) continue;
+        const rr = ringRFor(rest);
+        ctx.moveTo(x + rr, y);
+        ctx.arc(x, y, rr, 0, TWO_PI);
+      }
+    }
+    ctx.globalAlpha = dim === 1 ? 1 : 0.75; // rings soften only slightly when dimmed
+    ctx.lineWidth = Math.max(1.5, s.radius * 0.35);
+    ctx.strokeStyle = cssColor('var(--grade-c)');
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  },
+});
+const dotRenderer = new DotRenderer().addTo(map);
+
+// nearest visible restaurant within thresholdPx of a mouse latlng (linear scan of
+// 30k cached zoom-0 points ≈ 2–3 ms — no spatial index needed)
+function hitTest(latlng, thresholdPx) {
+  const scale = Math.pow(2, map.getZoom());
+  const mp = map.project(latlng, 0);
+  let best = null, bestD = (thresholdPx / scale) ** 2;
+  for (const state of Object.keys(stateBuckets)) {
+    if (!activeStates.has(state)) continue;
+    for (const rest of stateBuckets[state]) {
+      const dx = rest.__p0x - mp.x, dy = rest.__p0y - mp.y;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = rest; }
+    }
+  }
+  return best;
+}
+
+// hover tooltip + pointer cursor (rAF-throttled), and click-to-select
+const hoverTooltip = L.tooltip({ direction: 'top', offset: [0, -8] });
+let hoverRaf = null;
+map.on('mousemove', e => {
+  if (hoverRaf) return;
+  hoverRaf = requestAnimationFrame(() => {
+    hoverRaf = null;
+    const s = dotStyleForZoom(map.getZoom());
+    const rest = hitTest(e.latlng, Math.max(s.radius, 6) + 2);
+    map.getContainer().style.cursor = rest ? 'pointer' : '';
+    if (rest) {
+      const mates = filteredStackMembers(rest);
+      hoverTooltip
+        .setLatLng([rest.lat, rest.lng])
+        .setContent(mates.length >= 2
+          ? `${mates.length} places here` // U5b: never pretend a stack is one restaurant
+          : `${escapeHtml(rest.name)} — ${GRADE_STATES[rest.state].label}${rest.gradeIsStale ? ' •' : ''}` +
+            (rest.isClosed ? ' — <b style="color:#d73027">CLOSED by Health Dept</b>'
+             : rest.reopenedDate ? ' — <b style="color:#b45309">closed in the past, re-opened</b>' : ''));
+      if (!map.hasLayer(hoverTooltip)) hoverTooltip.addTo(map);
+    } else if (map.hasLayer(hoverTooltip)) {
+      hoverTooltip.remove();
+    }
+  });
+});
+// U5b: a restaurant's stack, reduced to legend-visible members ([] when unstacked)
+function filteredStackMembers(rest) {
+  if (!rest || !rest.__stack) return [];
+  return rest.__stack.filter(m => activeStates.has(m.state));
+}
+
+map.on('click', e => {
+  const s = dotStyleForZoom(map.getZoom());
+  const rest = hitTest(e.latlng, Math.max(s.radius, 8) + 3);
+  if (!rest) return;
+  const mates = filteredStackMembers(rest);
+  if (mates.length >= 2) openChooser(mates); // U5b: never silently open one of N
+  else selectRestaurant(rest.camis);
+});
+
+// ================= viewport pins (Q1) =================
+let restaurants = new Map();     // camis -> Restaurant (viewport slice, then the full city)
+let cityLoaded = false;          // once true, pans/zooms never fetch again
+let selectionMarker = null;      // grade-color pin marking the selected restaurant
+let lastFetchCapped = false;
+let pinsAbort = null;
+
+async function loadPins() {
+  if (cityLoaded) return; // the full-city cache renders everything; nothing to fetch
+  if (map.getZoom() < PIN_ZOOM_GATE) {
+    stateBuckets = {};
+    restaurants.clear();
+    dotRenderer.requestRedraw();
+    updateHint();
+    return;
+  }
+
+  if (pinsAbort) pinsAbort.abort('superseded');
+  pinsAbort = new AbortController();
+  const myAbort = pinsAbort; // this fetch's own controller (global gets reassigned by newer pans)
+
+  const b = map.getBounds();
+  const bbox =
+    `latitude between ${b.getSouth()} and ${b.getNorth()}` +
+    ` and longitude between ${b.getWest()} and ${b.getEast()}`;
+
+  // Two parallel grouped queries instead of raw violation rows (which burn the
+  // row cap at ~25 rows/restaurant): QA = one row per restaurant (complete),
+  // QB = one row per (restaurant, grade) with its latest date (≤ ~4 tiny rows
+  // per restaurant), merged client-side by picking each camis's newest grade.
+  let restRows, gradeRows;
+  try {
+    [restRows, gradeRows] = await Promise.all([
+      fetchRows({
+        '$select': 'camis,max(dba) as dba,max(latitude) as lat,max(longitude) as lng,max(inspection_date) as latest_date',
+        '$group': 'camis',
+        '$where': bbox,
+        '$limit': String(PIN_RESTAURANT_LIMIT),
+      }, myAbort.signal),
+      fetchRows({
+        '$select': 'camis,grade,max(inspection_date) as graded_date',
+        '$group': 'camis,grade',
+        '$where': bbox + ' and grade is not null',
+        '$limit': String(PIN_GRADE_ROW_LIMIT),
+      }, myAbort.signal),
+    ]);
+  } catch (err) {
+    if (myAbort.signal.aborted && myAbort.signal.reason === 'superseded') return; // a newer pan took over
+    showError(fetchErrorMessage(err), loadPins);
+    return; // keep last successful pins on the map
+  }
+  hideError();
+  if (cityLoaded) return; // full cache landed while this fetch was in flight — don't clobber it
+
+  lastFetchCapped = restRows.length >= PIN_RESTAURANT_LIMIT
+                 || gradeRows.length >= PIN_GRADE_ROW_LIMIT;
+
+  // newest grade per camis: the (camis, grade) row with the max graded_date
+  const latestGraded = new Map();
+  for (const r of gradeRows) {
+    const cur = latestGraded.get(r.camis);
+    if (!cur || r.graded_date > cur.graded_date) latestGraded.set(r.camis, r);
+  }
+
+  restaurants = new Map();
+  for (const r of restRows) {
+    const lat = parseFloat(r.lat), lng = parseFloat(r.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat === 0 || lng === 0) continue;
+    const graded = latestGraded.get(r.camis);
+    const rest = {
+      camis: r.camis,
+      name: r.dba || '(unnamed)',
+      lat, lng,
+      rawGrade: graded ? graded.grade : null,
+      latestInspectionDate: r.latest_date === SENTINEL_NEVER ? null : r.latest_date,
+      // inspected since last grading (newest inspection is newer than newest graded one)
+      gradeIsStale: !!graded && r.latest_date > graded.graded_date,
+    };
+    rest.state = gradeState({ rawGrade: rest.rawGrade, latestInspectionDate: r.latest_date });
+    restaurants.set(r.camis, rest);
+  }
+  if (!cityLoaded) buildMarkers(); // city cache may have landed while we were fetching
+}
+
+// Rebuild the renderer's buckets from the restaurants cache. Called once per data
+// refresh (viewport fetch or the one-time city load) — never on pan/zoom.
+function buildMarkers() {
+  stateBuckets = {};
+  for (const st of Object.keys(GRADE_STATES)) stateBuckets[st] = [];
+  const byCoord = new Map(); // U5b: exact-geocode stacks (string-equal lat,lng only)
+  for (const rest of restaurants.values()) {
+    if (rest.__p0x === undefined) {
+      const p = map.project([rest.lat, rest.lng], 0); // cache zoom-0 projection once
+      rest.__p0x = p.x; rest.__p0y = p.y;
+    }
+    stateBuckets[rest.state].push(rest);
+    const k = rest.lat + ',' + rest.lng;
+    let arr = byCoord.get(k);
+    if (!arr) byCoord.set(k, arr = []);
+    arr.push(rest);
+  }
+  stackList = [];
+  for (const arr of byCoord.values()) {
+    if (arr.length >= 2) {
+      arr.sort((a, b) => a.name.localeCompare(b.name));
+      stackList.push(arr);
+      for (const rest of arr) rest.__stack = arr;
+    } else {
+      arr[0].__stack = null;
+    }
+  }
+  dotRenderer.requestRedraw();
+  updateSelectionMarker();
+  updateHint();
+  ensureBackLink(); // a panel opened pre-cache (deep link) learns its stack only now
+}
+
+// U5b: retrofit the "← all N places here" link onto an open detail panel whose
+// restaurant turns out to be stacked — happens when a deep link renders before
+// the city cache (and its stack index) has landed.
+function ensureBackLink() {
+  if (!selectedCamis || !panel.classList.contains('open')) return;
+  if (panel.querySelector('.back-link') || panel.querySelector('.chooser-list')) return;
+  const camisNow = selectedCamis;
+  const mates = filteredStackMembers(restaurants.get(camisNow));
+  if (mates.length < 2) return;
+  const el = document.createElement('div');
+  el.className = 'back-link';
+  el.textContent = `← all ${mates.length} places here`;
+  el.addEventListener('click', () => {
+    const m2 = filteredStackMembers(restaurants.get(camisNow));
+    if (m2.length >= 2) openChooser(m2);
+  });
+  const anchor = panel.querySelector('.closed-banner, .reopened-banner, h2');
+  if (anchor) panel.insertBefore(el, anchor);
+}
+
+// Legend filter: the renderer consults activeStates on every draw — just redraw.
+function applyLegendFilter() {
+  dotRenderer.requestRedraw();
+  updateHint();
+}
+
+// Selection = a teardrop pin in the restaurant's own grade color (its dot is
+// skipped in the base draw), plus the renderer dims everything else.
+function updateSelectionMarker() {
+  if (selectionMarker) { selectionMarker.remove(); selectionMarker = null; }
+  const rest = selectedCamis ? restaurants.get(selectedCamis) : null;
+  if (rest) {
+    const color = cssColor(GRADE_STATES[rest.state].color);
+    const html =
+      `<div class="sel-pin-inner">` +
+      `<svg width="30" height="42" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">` +
+      `<path d="M15 41 C15 41 3 25.5 3 15 A12 12 0 1 1 27 15 C27 25.5 15 41 15 41 Z" ` +
+      `fill="${color}" stroke="#ffffff" stroke-width="2.5"/>` +
+      `<circle cx="15" cy="15" r="4.5" fill="#ffffff"/></svg></div>`;
+    selectionMarker = L.marker([rest.lat, rest.lng], {
+      icon: L.divIcon({ className: 'sel-pin', html, iconSize: [30, 42], iconAnchor: [15, 41] }),
+      interactive: false,
+      zIndexOffset: 1000,
+    }).addTo(map);
+  }
+  dotRenderer.requestRedraw(); // dim state and the skipped dot changed either way
+}
+
+function updateHint() {
+  if (cityLoaded) { hideHint(); return; } // city mode: no gate, no caps, no hints
+  if (map.getZoom() < PIN_ZOOM_GATE) { showHint('Zoom in to see restaurants'); return; }
+  const filterOn = activeStates.size < Object.keys(GRADE_STATES).length;
+  if (lastFetchCapped) {
+    showHint(filterOn ? 'Filter applied to partial results — zoom in' : 'Showing partial results — zoom in');
+  } else {
+    hideHint();
+  }
+}
+
+// ================= full-city cache =================
+// All ~31k restaurants via the same grouped-query pair, no bbox. Runs once in the
+// background after first paint; on success, per-pan fetching is off forever.
+async function loadFullCity(attempt = 0) {
+  let restRows, gradeRows, closedRows, reopenRows;
+  try {
+    [restRows, gradeRows, closedRows, reopenRows] = await Promise.all([
+      fetchRows({
+        // building/street/boro ride along for local search (U4) — same query, three
+        // more columns, no $where so alias reuse is safe (landmine #2 doesn't apply)
+        '$select': 'camis,max(dba) as dba,max(building) as bldg,max(street) as street,' +
+                   'max(boro) as boro,max(latitude) as lat,max(longitude) as lng,' +
+                   'max(inspection_date) as latest_date',
+        '$group': 'camis',
+        '$limit': String(CITY_RESTAURANT_LIMIT),
+      }, null, CITY_FETCH_TIMEOUT_MS),
+      fetchRows({
+        '$select': 'camis,grade,max(inspection_date) as graded_date',
+        '$group': 'camis,grade',
+        '$where': 'grade is not null',
+        '$limit': String(CITY_GRADE_ROW_LIMIT),
+      }, null, CITY_FETCH_TIMEOUT_MS),
+      // closure status: ~1.3k ever-closed + ~1.2k ever-re-opened rows citywide
+      fetchRows({
+        '$select': 'camis,max(inspection_date) as closed_date',
+        '$group': 'camis',
+        '$where': "action like '%Closed by DOHMH%'",
+        '$limit': '20000',
+      }, null, CITY_FETCH_TIMEOUT_MS),
+      fetchRows({
+        '$select': 'camis,max(inspection_date) as reopened_date',
+        '$group': 'camis',
+        '$where': "action like '%re-opened%'",
+        '$limit': '20000',
+      }, null, CITY_FETCH_TIMEOUT_MS),
+    ]);
+  } catch (err) {
+    // Not fatal — viewport mode keeps working. Retry twice, then give up quietly.
+    if (attempt < 2) setTimeout(() => loadFullCity(attempt + 1), 15000);
+    return;
+  }
+  if (restRows.length >= CITY_RESTAURANT_LIMIT || gradeRows.length >= CITY_GRADE_ROW_LIMIT) {
+    console.warn('city cache hit a row limit — raise CITY_* limits', restRows.length, gradeRows.length);
+  }
+
+  const latestGraded = new Map();
+  for (const r of gradeRows) {
+    const cur = latestGraded.get(r.camis);
+    if (!cur || r.graded_date > cur.graded_date) latestGraded.set(r.camis, r);
+  }
+  // currently closed = newest closure strictly newer than newest re-opening
+  // (same-day tie → the re-opening wins, matching the panel banner's rule)
+  const reopenedByCamis = new Map(reopenRows.map(r => [r.camis, r.reopened_date]));
+  const closedSet = new Set();
+  for (const r of closedRows) {
+    const reopened = reopenedByCamis.get(r.camis);
+    if (!reopened || r.closed_date > reopened) closedSet.add(r.camis);
+  }
+  const full = new Map();
+  for (const r of restRows) {
+    const lat = parseFloat(r.lat), lng = parseFloat(r.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat === 0 || lng === 0) continue;
+    const graded = latestGraded.get(r.camis);
+    const rest = {
+      camis: r.camis,
+      name: r.dba || '(unnamed)',
+      lat, lng,
+      address: [r.bldg, r.street].filter(Boolean).join(' ') + (r.boro ? `, ${r.boro}` : ''),
+      // precomputed search keys (U4): one uppercase pass now beats one per keystroke
+      nameKey: (r.dba || '').toUpperCase(),
+      addrKey: normAddr((r.bldg || '') + ' ' + (r.street || '')),
+      rawGrade: graded ? graded.grade : null,
+      latestInspectionDate: r.latest_date === SENTINEL_NEVER ? null : r.latest_date,
+      gradeIsStale: !!graded && r.latest_date > graded.graded_date,
+      isClosed: closedSet.has(r.camis),
+      // a re-open action implies a past closure even if the closure row has aged
+      // out of the dataset window — so "ever re-opened and not closed now" is enough
+      reopenedDate: closedSet.has(r.camis) ? null : (reopenedByCamis.get(r.camis) ?? null),
+    };
+    rest.state = gradeState({ rawGrade: rest.rawGrade, latestInspectionDate: r.latest_date });
+    full.set(r.camis, rest);
+  }
+
+  if (pinsAbort) pinsAbort.abort('superseded'); // any in-flight viewport fetch is obsolete
+  restaurants = full;
+  cityLoaded = true;
+  lastFetchCapped = false;
+  buildMarkers();
+}
+
+function cssColor(v) {
+  // resolve var(--x) to a concrete color for Leaflet's SVG attributes
+  const m = /^var\((--[\w-]+)\)$/.exec(v.trim());
+  return m ? getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim() : v;
+}
+
+// ================= detail panel (Q2) =================
+const panel = document.getElementById('panel');
+// (selectedCamis is declared up top with the pin-cache state — the renderer needs it)
+let panelAbort = null;
+
+// U5 "return ticket" (PRD §10 matrix): opening the panel from a pin tap saves the
+// pre-open view. Any user camera move (drag, zoom) or deliberate navigation (search
+// pick, near-me, deep link) tears the ticket up. Closing the panel reverts only
+// while a ticket is live — the map never rewinds a move the user made or asked for.
+let returnTicket = null;
+let autoMove = false; // a setView WE initiated is in flight — auto-pans must not tear the ticket
+function tearTicket() { returnTicket = null; }
+map.on('dragstart', tearTicket); // drags are always the user's (our animations never fire this)
+map.on('zoomstart', () => { if (!autoMove) tearTicket(); }); // wheel/pinch/dblclick/± buttons
+map.on('moveend', () => {
+  autoMove = false; // every programmatic move ends in exactly one moveend
+  try { // persist last view (U5) — device-only; storage failure = feature quietly off
+    const c = map.getCenter();
+    localStorage.setItem(LAST_VIEW_KEY, JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
+  } catch (e) {}
+});
+
+// Center the selected restaurant in the VISIBLE part of the map — above the
+// bottom sheet on phones, left of the side panel on wider screens.
+function focusSelected(lat, lng, opts = {}) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+  const size = map.getSize();
+  const isSheet = window.matchMedia('(max-width: 700px)').matches;
+  const zoom = opts.ensureZoom ? Math.max(map.getZoom(), PIN_ZOOM_GATE + 1) : map.getZoom();
+  const p = map.project([lat, lng], zoom);
+  const c = map.unproject(L.point(
+    p.x + (isSheet ? 0 : Math.min(400, size.x) / 2),  // side panel covers right 400px
+    p.y + (isSheet ? size.y * 0.62 / 2 : 0)           // bottom sheet covers 62vh
+  ), zoom);
+  autoMove = true; // panel-aware centering is an auto-pan — it must not tear the ticket
+  // Hidden tabs never run requestAnimationFrame, and Leaflet's animated zoom silently
+  // no-ops without it (the map just never moves — bites deep links opened in a
+  // background tab). Nobody can see an animation in a hidden tab; jump instantly.
+  map.setView(c, zoom, { animate: document.visibilityState !== 'hidden' });
+}
+
+function fmtDate(iso) {
+  return new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+// group per-violation rows into one entry per inspection
+function groupInspections(rows) {
+  const byKey = new Map();
+  for (const r of rows) {
+    const key = r.inspection_date + '|' + (r.inspection_type || '');
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        date: r.inspection_date,
+        type: r.inspection_type || null,
+        action: r.action || null,
+        grade: r.grade || null,
+        score: r.score != null ? Number(r.score) : null,
+        violations: [],
+      });
+    }
+    if (r.violation_code || r.violation_description) {
+      byKey.get(key).violations.push({
+        code: r.violation_code || '',
+        description: r.violation_description || '(no description)',
+        critical: r.critical_flag === 'Critical',
+      });
+    }
+  }
+  // API row order within an inspection is arbitrary — show critical items first,
+  // then sort by code so related violations cluster together
+  for (const insp of byKey.values()) {
+    insp.violations.sort((a, b) => (b.critical - a.critical) || a.code.localeCompare(b.code));
+  }
+  return [...byKey.values()].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+async function selectRestaurant(camis, opts = {}) {
+  selectedCamis = camis;
+  writeDeepLink(camis); // shareable URL for the selected restaurant
+  updateSelectionMarker(); // highlight the selected pin
+  if (opts.center) {
+    tearTicket(); // deliberate navigation (search pick / deep link) — closing stays put
+  } else if (!panel.classList.contains('open')) {
+    returnTicket = { center: map.getCenter(), zoom: map.getZoom() }; // pin tap: issue the ticket
+  }
+  // pin taps while the panel is already open keep the original ticket state (matrix row 4)
+  panel.classList.add('open');
+  panel.innerHTML = '<div class="panel-loading">Loading inspection history…</div>';
+
+  if (panelAbort) panelAbort.abort('superseded');
+  panelAbort = new AbortController();
+  const myAbort = panelAbort;
+
+  let rows;
+  try {
+    rows = await fetchRows({
+      '$select': 'camis,dba,building,street,boro,zipcode,cuisine_description,latitude,longitude,' +
+                 'inspection_date,inspection_type,action,grade,grade_date,score,' +
+                 'violation_code,violation_description,critical_flag',
+      '$where': `camis='${soqlStr(camis)}'`,
+      '$order': 'inspection_date DESC',
+      '$limit': '500',
+    }, myAbort.signal);
+  } catch (err) {
+    if (myAbort.signal.aborted && myAbort.signal.reason === 'superseded') return;
+    panel.innerHTML = '<div class="panel-loading">Couldn’t load this restaurant’s history — try again in a minute.</div>';
+    return;
+  }
+  if (!rows.length) {
+    panel.innerHTML = '<div class="panel-loading">No records found for this restaurant.</div>';
+    return;
+  }
+
+  const first = rows[0];
+  const gradedRow = rows.find(r => r.grade);
+  const neverInspected = first.inspection_date === SENTINEL_NEVER;
+  const state = gradeState({
+    rawGrade: gradedRow ? gradedRow.grade : null,
+    latestInspectionDate: first.inspection_date,
+  });
+  const gradeIsStale = !!gradedRow && !first.grade && !neverInspected;
+  const inspections = neverInspected ? [] : groupInspections(rows);
+  // Closed by DOHMH with no later re-opening. Look at the newest closure/re-open
+  // action; on a same-date tie the re-opening wins (it logically follows the closure).
+  const statusEvents = inspections.filter(i => /closed by dohmh|re-open/i.test(i.action || ''));
+  const newestStatusDate = statusEvents.length ? statusEvents[0].date : null;
+  const isClosed = statusEvents.length > 0 &&
+    !statusEvents.some(i => i.date === newestStatusDate && /re-open/i.test(i.action)) &&
+    /closed by dohmh/i.test(statusEvents.find(i => i.date === newestStatusDate).action);
+  // past closure, since re-opened: the newest re-open action (a re-open implies a
+  // closure even when the closure row has aged out of the dataset window)
+  const newestReopen = !isClosed ? statusEvents.find(i => /re-open/i.test(i.action)) : null;
+  const reopenedDate = newestReopen ? newestReopen.date : null;
+  const priorClose = newestReopen ? statusEvents.find(i => /closed by dohmh/i.test(i.action)) : null;
+
+  // The panel's per-restaurant verdict is authoritative — sync it into the cache
+  // so the map ring always agrees with the banner (and refresh the ring pass).
+  const cached = restaurants.get(camis);
+  if (cached && (cached.isClosed !== isClosed || cached.reopenedDate !== reopenedDate)) {
+    cached.isClosed = isClosed;
+    cached.reopenedDate = reopenedDate;
+    dotRenderer.requestRedraw();
+  }
+
+  renderPanel({
+    camis,
+    name: first.dba || '(unnamed)',
+    address: [first.building, first.street].filter(Boolean).join(' ') +
+             (first.boro ? `, ${first.boro}` : '') + (first.zipcode ? ` ${first.zipcode}` : ''),
+    cuisine: first.cuisine_description || null,
+    state,
+    rawGrade: gradedRow ? gradedRow.grade : null,
+    gradedDate: gradedRow ? gradedRow.inspection_date : null,
+    gradeIsStale,
+    neverInspected,
+    isClosed,
+    closedDate: isClosed ? newestStatusDate : null,
+    reopenedDate,
+    priorClosedDate: priorClose ? priorClose.date : null,
+    inspections,
+  });
+
+  // Always bring the selection into the visible (non-panel) part of the map.
+  // opts.center (search / deep link) also guarantees a useful zoom level.
+  const rest = restaurants.get(camis);
+  const lat = rest ? rest.lat : parseFloat(first.latitude ?? NaN);
+  const lng = rest ? rest.lng : parseFloat(first.longitude ?? NaN);
+  // Deep link before the cache has this restaurant: add a minimal entry so the
+  // selection ring can render.
+  if (!rest && Number.isFinite(lat) && Number.isFinite(lng)) {
+    restaurants.set(camis, {
+      camis, name: first.dba || '(unnamed)', lat, lng,
+      address: [first.building, first.street].filter(Boolean).join(' ') + (first.boro ? `, ${first.boro}` : ''),
+      nameKey: (first.dba || '').toUpperCase(),
+      addrKey: normAddr((first.building || '') + ' ' + (first.street || '')),
+      rawGrade: gradedRow ? gradedRow.grade : null,
+      latestInspectionDate: neverInspected ? null : first.inspection_date,
+      gradeIsStale, state, isClosed, reopenedDate,
+    });
+    updateSelectionMarker();
+  }
+  focusSelected(lat, lng, { ensureZoom: !!opts.center });
+}
+
+function renderPanel(r) {
+  const badgeColor = cssColor(GRADE_STATES[r.state].color);
+  const badgeText = ['A', 'B', 'C'].includes(r.state) ? r.state
+                  : r.state === 'PENDING' ? 'P?' : r.state === 'NEVER' ? '—' : '?';
+
+  const PENDING_MEANINGS = {
+    Z: 'code Z — scored poorly on an initial inspection; awaiting the re-inspection that sets the letter grade',
+    P: 'code P — re-opened after a DOHMH closure; grade pending',
+    N: 'code N — not yet graded',
+  };
+
+  let gradeNote;
+  if (r.neverInspected) {
+    gradeNote = 'Not yet inspected — the city’s dataset shows no inspection on record.';
+  } else if (r.state === 'PENDING') {
+    gradeNote = `Grade pending (${PENDING_MEANINGS[r.rawGrade] || 'pending'}; ${fmtDate(r.gradedDate)})`;
+  } else if (r.state === 'NONE') {
+    gradeNote = 'No letter grade — none of its inspections were of a type that issues grades.';
+  } else {
+    gradeNote = `Graded ${fmtDate(r.gradedDate)}`;
+  }
+  if (r.gradeIsStale && !r.neverInspected && r.state !== 'NONE') {
+    gradeNote += ' • Inspected more recently — not all inspection types issue grades; see history below.';
+  }
+
+  const inspHtml = r.inspections.map(insp => {
+    const violations = insp.violations.map(v => {
+      const g = VIOLATION_GLOSSES[v.code];
+      // glossed: plain-English line up front, official wording one tap away;
+      // long-tail entries may have no icon; unknown codes render raw text as before
+      const body = g
+        ? `${g.icon ? `<span class="v-icon">${g.icon}</span> ` : ''}<strong>${escapeHtml(g.gloss)}</strong>
+           <details class="v-details"><summary>full inspector wording</summary>
+           <div class="v-legal">${escapeHtml(v.description)}</div></details>`
+        : escapeHtml(v.description);
+      return `
+      <div class="violation${v.critical ? ' critical' : ''}">
+        ${v.critical ? '<span class="crit-tag">⚠ Critical</span> ' : ''}
+        ${body}
+      </div>`;
+    }).join('');
+    const metaBits = [];
+    if (insp.grade) metaBits.push(`Grade: ${escapeHtml(insp.grade)}`);
+    if (insp.score != null && Number.isFinite(insp.score)) metaBits.push(`Score: ${insp.score} (lower is better · city median ≈ ${CITY_MEDIAN_SCORE})`);
+    return `
+      <div class="inspection">
+        <div class="insp-head">
+          <span class="insp-date">${fmtDate(insp.date)}</span>
+        </div>
+        ${insp.type ? `<div class="insp-type">${escapeHtml(insp.type)}</div>` : ''}
+        ${/closed by dohmh|re-open/i.test(insp.action || '') ? `<div class="insp-action">${escapeHtml(insp.action)}</div>` : ''}
+        ${metaBits.length ? `<div class="insp-meta">${metaBits.join(' · ')}</div>` : ''}
+        ${violations || '<div class="insp-meta">No violations recorded.</div>'}
+      </div>`;
+  }).join('');
+
+  // V3 grade history strip: letter-graded inspections only (pending Z/P/N excluded),
+  // last 6, shown oldest→newest. r.inspections is newest-first, so slice then reverse.
+  // Hidden below 2 letters — a single grade is already the badge above it.
+  const gradedHistory = r.inspections.filter(i => ['A', 'B', 'C'].includes(i.grade));
+  const stripDate = iso => {
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-US', { month: 'short' }) + ' ’' + String(d.getFullYear()).slice(-2);
+  };
+  const stripHtml = gradedHistory.length >= 2
+    ? `<div class="grade-strip" title="Grade history, oldest to newest">${
+        gradedHistory.slice(0, 6).reverse().map(i =>
+          `<span class="strip-item"><span class="strip-badge" title="${fmtDate(i.date)}" style="background:${cssColor(GRADE_STATES[i.grade].color)}">${i.grade}</span><span class="strip-date">${stripDate(i.date)}</span></span>`
+        ).join('<span class="strip-arrow">→</span>')
+      }</div>`
+    : '';
+
+  // U5b: restaurants on a stacked point get a way back to the full list
+  const stackMates = filteredStackMembers(restaurants.get(r.camis));
+
+  panel.innerHTML = `
+    <button class="close-btn" aria-label="Close">✕</button>
+    <button class="share-btn" aria-label="Share" title="Share a link to this restaurant">🔗</button>
+    ${stackMates.length >= 2 ? `<div class="back-link">← all ${stackMates.length} places here</div>` : ''}
+    ${r.isClosed ? `<div class="closed-banner">⚠ Closed by the Health Department (${fmtDate(r.closedDate)}) — no re-opening on record.</div>` : ''}
+    ${!r.isClosed && r.reopenedDate ? `<div class="reopened-banner">⚠ Closed by the Health Department in the past${r.priorClosedDate ? ` (${fmtDate(r.priorClosedDate)})` : ''} — re-opened ${fmtDate(r.reopenedDate)}.</div>` : ''}
+    <h2>${escapeHtml(r.name)}</h2>
+    <div class="sub">${escapeHtml(r.address)}</div>
+    ${r.cuisine ? `<div class="sub">${escapeHtml(r.cuisine)}</div>` : ''}
+    <div class="grade-line">
+      <span class="grade-badge" style="background:${badgeColor}">${badgeText}</span>
+      <span class="grade-note">${escapeHtml(gradeNote)}</span>
+    </div>
+    ${stripHtml}
+    ${r.neverInspected
+      ? '<div class="inspection">The city&#39;s dataset shows no inspection on record for this restaurant. Recent inspections can take a few days to appear, and re-permitted restaurants start a fresh record.</div>'
+      : `<h3 style="font-size:14px;margin:14px 0 4px">Inspection history (${r.inspections.length})</h3>${inspHtml}`}
+  `;
+  panel.querySelector('.close-btn').addEventListener('click', closePanel);
+  panel.querySelector('.share-btn').addEventListener('click', () => shareRestaurant(r));
+  const backLink = panel.querySelector('.back-link');
+  if (backLink) {
+    backLink.addEventListener('click', () => {
+      const mates = filteredStackMembers(restaurants.get(r.camis));
+      if (mates.length >= 2) openChooser(mates); // recompute — filter may have changed
+    });
+  }
+  panel.scrollTop = 0;
+}
+
+function closePanel() {
+  panel.classList.remove('open');
+  selectedCamis = null;
+  writeDeepLink(null);
+  updateSelectionMarker();
+  if (returnTicket) {
+    autoMove = true;
+    map.setView(returnTicket.center, returnTicket.zoom, { animate: document.visibilityState !== 'hidden' });
+  }
+  returnTicket = null;
+}
+
+// ================= stacked-dot chooser (U5b) =================
+// Panel in "N places here" mode. Chooser mode selects nothing: no teardrop pin,
+// no dim, no ?camis= URL — those happen only when a specific restaurant is picked.
+function openChooser(members) {
+  // pin-tap camera semantics: issue the return ticket only if the panel was closed
+  if (!panel.classList.contains('open')) {
+    returnTicket = { center: map.getCenter(), zoom: map.getZoom() };
+  }
+  if (panelAbort) panelAbort.abort('superseded'); // cancel any in-flight detail fetch
+  selectedCamis = null;
+  writeDeepLink(null);
+  updateSelectionMarker();
+
+  const rows = members.map(m => {
+    const badgeText = ['A', 'B', 'C'].includes(m.state) ? m.state
+                    : m.state === 'PENDING' ? 'P?' : m.state === 'NEVER' ? '—' : '?';
+    return `
+      <div class="sugg" data-camis="${escapeHtml(m.camis)}">
+        <div class="sugg-text">
+          <div class="sugg-name">${escapeHtml(m.name)}${m.gradeIsStale ? ' •' : ''}${
+            m.isClosed ? ' <span class="closed-tag">CLOSED</span>'
+            : m.reopenedDate ? ' <span class="reopened-tag">re-opened</span>' : ''}</div>
+        </div>
+        <span class="mini-badge" style="background:${cssColor(GRADE_STATES[m.state].color)}">${badgeText}</span>
+      </div>`;
+  }).join('');
+
+  panel.classList.add('open');
+  panel.innerHTML = `
+    <button class="close-btn" aria-label="Close">✕</button>
+    <h2>${members.length} places here</h2>
+    ${members[0].address ? `<div class="sub">${escapeHtml(members[0].address)}</div>` : ''}
+    <div class="sub" style="margin-bottom:8px">One point on the map — several permitted restaurants (food hall, market, or shared kitchen). Tap one:</div>
+    <div class="chooser-list">${rows}</div>`;
+  panel.querySelector('.close-btn').addEventListener('click', closePanel);
+  panel.querySelector('.chooser-list').addEventListener('click', e => {
+    const el = e.target.closest('.sugg');
+    if (!el) return;
+    // panel is already open here, so selectRestaurant keeps the ticket (matrix row 4)
+    selectRestaurant(el.dataset.camis);
+  });
+  panel.scrollTop = 0;
+}
+
+// debounce pin loading on map movement (no-op once the city cache is loaded)
+let moveTimer = null;
+map.on('moveend', () => {
+  clearTimeout(moveTimer);
+  moveTimer = setTimeout(loadPins, 400);
+});
+
+// (dot size/opacity per zoom is applied inside the renderer's own redraws)
+
+// ================= search-as-you-type (Q3) =================
+const searchInput = document.getElementById('search');
+const suggBox = document.getElementById('suggestions');
+const SEARCH_MIN_CHARS = 2;
+const SEARCH_DEBOUNCE_MS = 300;        // server fallback (pre-city-cache)
+const SEARCH_DEBOUNCE_LOCAL_MS = 120;  // local search is a ~30k in-memory scan — keep it snappy
+const SEARCH_MAX_SHOWN = 8;            // server fallback only; local shows everything
+let searchTimer = null;
+let searchAbort = null;
+
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const q = searchInput.value.trim();
+  if (q.length < SEARCH_MIN_CHARS) { closeSuggestions(); return; }
+  searchTimer = setTimeout(() => runSearch(q), cityLoaded ? SEARCH_DEBOUNCE_LOCAL_MS : SEARCH_DEBOUNCE_MS);
+});
+searchInput.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeSuggestions();
+  if (e.key === 'Enter') {
+    const firstSugg = suggBox.querySelector('.sugg');
+    if (firstSugg) firstSugg.click();
+  }
+});
+document.addEventListener('click', e => {
+  if (!document.getElementById('search-wrap').contains(e.target)) closeSuggestions();
+});
+
+async function runSearch(q) {
+  if (cityLoaded) { localSearch(q); return; } // U4: the cache is complete — no network
+  if (searchAbort) searchAbort.abort('superseded');
+  searchAbort = new AbortController();
+  const myAbort = searchAbort;
+
+  const nameFilter = `upper(dba) like upper('%${soqlStr(q)}%')`;
+
+  // same grouped-pair pattern as the pins: complete restaurant list + newest grade
+  let restRows, gradeRows;
+  try {
+    [restRows, gradeRows] = await Promise.all([
+      fetchRows({
+        // aliases must NOT reuse a column name referenced in $where (alias shadows
+        // the column and Socrata 400s with aggregate-in-ungrouped-context)
+        '$select': 'camis,max(dba) as name,max(building) as bldg,max(street) as st,' +
+                   'max(boro) as borough,max(latitude) as lat,max(longitude) as lng,' +
+                   'max(inspection_date) as latest_date',
+        '$group': 'camis',
+        '$where': nameFilter,
+        '$limit': '150',
+      }, myAbort.signal),
+      fetchRows({
+        '$select': 'camis,grade,max(inspection_date) as graded_date',
+        '$group': 'camis,grade',
+        '$where': nameFilter + ' and grade is not null',
+        '$limit': '600',
+      }, myAbort.signal),
+    ]);
+  } catch (err) {
+    if (myAbort.signal.aborted && myAbort.signal.reason === 'superseded') return;
+    renderSuggestions([], q, true);
+    return;
+  }
+
+  const latestGraded = new Map();
+  for (const r of gradeRows) {
+    const cur = latestGraded.get(r.camis);
+    if (!cur || r.graded_date > cur.graded_date) latestGraded.set(r.camis, r);
+  }
+
+  const center = map.getCenter();
+  const results = restRows.map(r => {
+    const graded = latestGraded.get(r.camis);
+    const lat = parseFloat(r.lat), lng = parseFloat(r.lng);
+    const hasCoords = Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
+    return {
+      camis: r.camis,
+      name: r.name || '(unnamed)',
+      address: [r.bldg, r.st].filter(Boolean).join(' ') + (r.borough ? `, ${r.borough}` : ''),
+      state: gradeState({ rawGrade: graded ? graded.grade : null, latestInspectionDate: r.latest_date }),
+      gradeIsStale: !!graded && r.latest_date > graded.graded_date,
+      // squared-degree distance is fine for ranking; coordless places sort last
+      dist: hasCoords ? (lat - center.lat) ** 2 + (lng - center.lng) ** 2 : Infinity,
+    };
+  }).sort((a, b) => a.dist - b.dist).slice(0, SEARCH_MAX_SHOWN);
+
+  renderSuggestions(results, q, false);
+}
+
+// ---- U4: local search over the city cache (no network) ----
+// Digit-leading query → address mode: normalized building+street substring match.
+// Otherwise name mode: uppercase substring. Prefix matches rank above mid-string
+// matches; ties break by distance from the current map center.
+function localSearch(q) {
+  const isAddr = /^\d/.test(q);
+  const nq = isAddr ? normAddr(q) : q.toUpperCase();
+  const center = map.getCenter();
+  const results = [];
+  for (const r of restaurants.values()) {
+    const idx = (isAddr ? r.addrKey : r.nameKey).indexOf(nq);
+    if (idx === -1) continue;
+    results.push({
+      camis: r.camis, name: r.name, address: r.address, state: r.state,
+      gradeIsStale: r.gradeIsStale,
+      rank: idx === 0 ? 0 : 1,
+      dist: (r.lat - center.lat) ** 2 + (r.lng - center.lng) ** 2,
+    });
+  }
+  results.sort((a, b) => a.rank - b.rank || a.dist - b.dist);
+  renderSuggestions(results, q, false,
+    `${results.length.toLocaleString()} match${results.length === 1 ? '' : 'es'}`);
+}
+
+function renderSuggestions(results, q, isError, footer) {
+  if (isError) {
+    suggBox.innerHTML = '<div class="sugg-empty">Search is unavailable right now — try again in a minute.</div>';
+  } else if (!results.length) {
+    suggBox.innerHTML = `<div class="sugg-empty">No restaurants match “${escapeHtml(q)}”.</div>`;
+  } else {
+    suggBox.innerHTML = results.map(r => {
+      const badgeText = ['A', 'B', 'C'].includes(r.state) ? r.state
+                      : r.state === 'PENDING' ? 'P?' : r.state === 'NEVER' ? '—' : '?';
+      const closed = restaurants.get(r.camis)?.isClosed; // city cache knows closure status
+      return `
+        <div class="sugg" data-camis="${escapeHtml(r.camis)}">
+          <div class="sugg-text">
+            <div class="sugg-name">${escapeHtml(r.name)}${r.gradeIsStale ? ' •' : ''}${closed ? ' <span class="closed-tag">CLOSED</span>' : ''}</div>
+            <div class="sugg-addr">${escapeHtml(r.address)}</div>
+          </div>
+          <span class="mini-badge" style="background:${cssColor(GRADE_STATES[r.state].color)}">${badgeText}</span>
+        </div>`;
+    }).join('') + (footer ? `<div class="sugg-count">${escapeHtml(footer)}</div>` : '');
+  }
+  suggBox.classList.add('open');
+}
+
+// one delegated click handler instead of per-row listeners — local result lists
+// can run to thousands of rows (U4)
+suggBox.addEventListener('click', e => {
+  const el = e.target.closest('.sugg');
+  if (!el) return;
+  closeSuggestions();
+  searchInput.blur();
+  selectRestaurant(el.dataset.camis, { center: true });
+});
+
+function closeSuggestions() { suggBox.classList.remove('open'); suggBox.innerHTML = ''; }
+
+// ================= clickable-legend grade filter =================
+// (activeStates itself is declared up top, next to GRADE_STATES)
+document.querySelectorAll('#legend .row[data-states]').forEach(row => {
+  row.addEventListener('click', () => {
+    const states = row.dataset.states.split(',');
+    const turningOff = states.every(s => activeStates.has(s));
+    for (const s of states) turningOff ? activeStates.delete(s) : activeStates.add(s);
+    row.classList.toggle('off', turningOff);
+    applyLegendFilter();
+  });
+});
+
+// ================= grade explainer =================
+const explainerBackdrop = document.getElementById('explainer-backdrop');
+document.getElementById('explainer-link').addEventListener('click', e => {
+  e.stopPropagation(); // don't trigger the legend filter handler
+  explainerBackdrop.classList.add('open');
+});
+explainerBackdrop.addEventListener('click', e => {
+  if (e.target === explainerBackdrop || e.target.classList.contains('close-btn')) {
+    explainerBackdrop.classList.remove('open');
+  }
+});
+
+// ================= welcome popup (V1) =================
+// First visit only; a shared ?camis= link answers, it never onboards. Blocked
+// storage must never trap the user: fall back to once-per-session, fail open.
+const WELCOME_KEY = 'ratpack.welcomed';
+const welcomeBackdrop = document.getElementById('welcome-backdrop');
+let welcomedThisSession = false;
+
+function shouldWelcome() {
+  if (deepLinkedCamis || welcomedThisSession) return false;
+  try { return localStorage.getItem(WELCOME_KEY) !== '1'; }
+  catch (e) { return true; } // storage blocked → show once per session
+}
+function dismissWelcome() {
+  welcomedThisSession = true;
+  try { localStorage.setItem(WELCOME_KEY, '1'); } catch (e) { /* session fallback holds */ }
+  welcomeBackdrop.classList.remove('open');
+}
+document.getElementById('welcome-dismiss').addEventListener('click', dismissWelcome);
+welcomeBackdrop.addEventListener('click', e => { if (e.target === welcomeBackdrop) dismissWelcome(); });
+document.getElementById('welcome-explainer-link').addEventListener('click', () => {
+  dismissWelcome();
+  explainerBackdrop.classList.add('open');
+});
+
+// ================= near me =================
+let youMarker = null;
+
+document.getElementById('nearme').addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    flashHint('Location isn’t supported by this browser — search or pan instead.');
+    return;
+  }
+  showHint('Finding your location…');
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      hideHint();
+      const { latitude, longitude } = pos.coords;
+      if (youMarker) youMarker.remove();
+      youMarker = L.circleMarker([latitude, longitude], {
+        radius: 8, color: '#fff', weight: 2.5, fillColor: '#1d4ed8', fillOpacity: 1,
+      }).addTo(map).bindTooltip('You are here');
+      tearTicket(); // near-me is deliberate navigation — closing the panel later stays here
+      map.setView([latitude, longitude], Math.max(map.getZoom(), 16));
+    },
+    err => {
+      flashHint(err.code === err.PERMISSION_DENIED
+        ? 'Location permission denied — search or pan to a neighborhood instead.'
+        : 'Couldn’t get your location — search or pan instead.');
+    },
+    { timeout: 8000, maximumAge: 60000 }
+  );
+});
+
+// temporary hint that doesn't clobber the persistent zoom-gate/partial notes
+function flashHint(msg) {
+  showHint(msg);
+  setTimeout(updateHint, 4000); // recomputes the right persistent hint state
+}
+
+// ================= share (V4) =================
+// Mobile gets the native share sheet; desktop copies the deep link. The UA check is
+// deliberate: desktop Chrome also has navigator.share, but its OS share popup is a
+// worse experience there than a straight copy.
+async function shareRestaurant(r) {
+  const url = `${location.origin}${location.pathname}?camis=${encodeURIComponent(r.camis)}`;
+  const mobile = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
+  if (navigator.share && mobile) {
+    try { await navigator.share({ title: `${r.name} on Rat Pack`, url }); } catch (e) { /* user closed the sheet */ }
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    flashHint('Link copied');
+  } catch (e) {
+    flashHint('Copy was blocked. The full link is in your address bar.');
+  }
+}
+
+// ================= deep link (?camis=) =================
+function writeDeepLink(camis) {
+  const url = camis ? `${location.pathname}?camis=${encodeURIComponent(camis)}` : location.pathname;
+  history.replaceState(null, '', url);
+}
+
+// ================= initial load =================
+{
+  if (deepLinkedCamis) { // parsed up top, before map init — the stored view already deferred to it
+    selectRestaurant(deepLinkedCamis, { center: true }); // opens panel; pins load via the setView moveend
+  } else {
+    loadPins();
+  }
+  loadFullCity(); // background; switches off per-pan fetching when it lands
+  if (shouldWelcome()) welcomeBackdrop.classList.add('open'); // V1: first visit only
+}
+</script>
+</body>
+</html>
