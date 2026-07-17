@@ -146,7 +146,11 @@
   .grade-line { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
   .grade-note { font-size: 12.5px; color: #555; }
   .grade-strip { display: flex; align-items: flex-start; gap: 4px; margin: 6px 0 2px; flex-wrap: wrap; }
-  .c311-line { font-size: 12.5px; color: #666; margin: 8px 0 0; }
+  .c311-box { background: #f6f7f9; border-radius: 8px; padding: 8px 10px; margin: 10px 0 0; font-size: 12.5px; color: #444; }
+  .c311-head { font-size: 11px; color: #8a8f98; margin-bottom: 4px; }
+  .c311-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .c311-tag { background: #e9ebef; border-radius: 10px; padding: 1px 8px; font-size: 11px; color: #555; }
+  .c311-rod { margin-top: 5px; }
   .grade-strip .strip-item { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
   .grade-strip .strip-badge {
     display: inline-flex; align-items: center; justify-content: center;
@@ -1378,16 +1382,28 @@ async function selectRestaurant(camis, opts = {}) {
   focusSelected(lat, lng, { ensureZoom: !!opts.center });
 }
 
-// T2 (v1.5): 311 food-safety complaint line. Complaints carry no restaurant id,
-// only a building (bbl) — so a multi-restaurant building gets the honest
-// building-level phrasing. Zero complaints or no enrichment = no line at all.
+// T2+T2b (v1.5): 311 block. Complaints carry no restaurant id, only a building
+// (bbl) — so multi-restaurant buildings get the honest building-level phrasing,
+// and rodent reports (inherently about the property, mostly apartments above or
+// the sidewalk out front) are ALWAYS building-level. "What was reported" lists
+// the official 311 descriptors via the legend in meta.c311_descriptors.
+// Zero complaints or no enrichment = no block at all; one as-of per block.
 function c311Line(camis) {
   const e = enrichment?.c311?.[camis];
   if (!e) return '';
-  const asOf = ` · as of ${fmtDate(enrichment.meta.generated + 'T00:00:00')}`;
-  if (e.n) return `<div class="c311-line">${Number(e.n)} food-safety 311 complaint${e.n === 1 ? '' : 's'} in the last 12 months (approximate match)${asOf}</div>`;
-  if (e.bldg) return `<div class="c311-line">${Number(e.bldg)} complaint${e.bldg === 1 ? '' : 's'} at this building (may include neighbors)${asOf}</div>`;
-  return '';
+  const legend = enrichment.meta.c311_descriptors || [];
+  let food = '';
+  if (e.n) food = `<div>${Number(e.n)} food-safety complaint${e.n === 1 ? '' : 's'} (approximate match)</div>`;
+  else if (e.bldg) food = `<div>${Number(e.bldg)} complaint${e.bldg === 1 ? '' : 's'} at this building (may include neighbors)</div>`;
+  const tags = (e.d || [])
+    .map(([i, k]) => `<span class="c311-tag">${escapeHtml(legend[i] ?? 'Other')}${k > 1 ? ` ×${Number(k)}` : ''}</span>`)
+    .join('');
+  const rod = e.rod ? `<div class="c311-rod">🐀 ${Number(e.rod)} rodent report${e.rod === 1 ? '' : 's'} at this building</div>` : '';
+  if (!food && !rod) return '';
+  return `<div class="c311-box">
+    <div class="c311-head">311 reports, last 12 months · as of ${fmtDate(enrichment.meta.generated + 'T00:00:00')}</div>
+    ${food}${tags ? `<div class="c311-tags">${tags}</div>` : ''}${rod}
+  </div>`;
 }
 
 function renderPanel(r) {

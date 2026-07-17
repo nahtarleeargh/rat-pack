@@ -33,35 +33,45 @@ def soda(url, params):
 
 
 def build_c311(today):
-    """311 food-safety complaint counts per restaurant (T2, SPEC section 9).
+    """311 complaint data per restaurant (T2 + T2b, SPEC section 9).
 
-    Complaints carry no camis, so the join is by bbl (97% of food complaints
-    have one). A bbl with exactly one restaurant -> that camis gets "n";
-    a multi-restaurant bbl -> every camis there gets building-level "bldg".
-    Complaints without a bbl (~3%) are dropped rather than fuzzily matched.
+    Complaints carry no camis, so everything joins by bbl (96-97% coverage).
+    Food complaints (Food Establishment + Food Poisoning): a bbl with exactly
+    one restaurant -> that camis gets "n"; a multi-restaurant bbl -> every
+    camis there gets building-level "bldg". Each entry also carries "d", the
+    what-was-reported breakdown as [descriptor_id, count] pairs (ids index
+    into the legend this function returns; Food Poisoning descriptors are
+    victim counts, so those rows are labeled just "Food poisoning").
+    Rodent complaints are property-level by nature (mostly apartments above /
+    sidewalks out front), so every camis on the bbl gets the same "rod" count
+    and the site must always phrase it building-level.
+    Complaints without a bbl (~3-4%) are dropped rather than fuzzily matched.
     """
     since = (today - datetime.timedelta(days=365)).isoformat()
+    when = f" and created_date >= '{since}T00:00:00' and bbl is not null"
     rows = soda(API_311, {
-        # grouped by (bbl, descriptor): totals plus a majority descriptor per
-        # bbl, without max()'s one-row-outlier trap (BUILD-LOG landmine 9)
         "$select": "bbl,complaint_type,descriptor,count(*) as n",
         "$group": "bbl,complaint_type,descriptor",
-        "$where": "complaint_type in('Food Establishment','Food Poisoning')"
-                  f" and created_date >= '{since}T00:00:00' and bbl is not null",
+        "$where": "complaint_type in('Food Establishment','Food Poisoning')" + when,
         "$limit": "50000",
     })
-    per_bbl = {}
+    per_bbl = {}    # bbl -> {label: count}
+    label_totals = {}
     for row in rows:
-        b = row["bbl"]
         n = int(row["n"])
-        d = per_bbl.setdefault(b, {"total": 0, "top": "", "top_n": 0})
-        d["total"] += n
-        if n > d["top_n"]:
-            # Food Poisoning descriptors are victim counts ("1 or 2") — useless
-            # as a label; the complaint type itself is the story there
-            label = (row.get("descriptor", "") if row.get("complaint_type") == "Food Establishment"
-                     else "Food poisoning")
-            d["top"], d["top_n"] = label, n
+        label = (row.get("descriptor", "") or "(no descriptor)") \
+            if row.get("complaint_type") == "Food Establishment" else "Food poisoning"
+        d = per_bbl.setdefault(row["bbl"], {})
+        d[label] = d.get(label, 0) + n
+        label_totals[label] = label_totals.get(label, 0) + n
+
+    rod_rows = soda(API_311, {
+        "$select": "bbl,count(*) as n",
+        "$group": "bbl",
+        "$where": "complaint_type='Rodent'" + when,
+        "$limit": "50000",
+    })
+    rod_bbl = {r["bbl"]: int(r["n"]) for r in rod_rows}
 
     rest = soda(API_INSP, {
         "$select": "camis,max(bbl) as bbl",
@@ -77,34 +87,47 @@ def build_c311(today):
             continue
         bbl_camis.setdefault(b, []).append(r["camis"])
 
+    # legend: descriptor strings stored once, ordered by citywide volume so
+    # ids are small and roughly stable day to day
+    legend = sorted(label_totals, key=label_totals.get, reverse=True)
+    idx = {label: i for i, label in enumerate(legend)}
+
     c311 = {}
     matched = 0
-    for b, d in per_bbl.items():
-        camis_list = bbl_camis.get(b)
-        if not camis_list:
+    for b, camis_list in bbl_camis.items():
+        food = per_bbl.get(b)
+        rod = rod_bbl.get(b, 0)
+        if not food and not rod:
             continue
-        matched += d["total"]
-        key = "n" if len(camis_list) == 1 else "bldg"
+        entry = {}
+        if food:
+            total = sum(food.values())
+            matched += total
+            entry["n" if len(camis_list) == 1 else "bldg"] = total
+            entry["d"] = sorted(([idx[label], k] for label, k in food.items()),
+                                key=lambda p: -p[1])
+        if rod:
+            entry["rod"] = rod
         for c in camis_list:
-            entry = {key: d["total"]}
-            if d["top"]:
-                entry["top"] = d["top"]
             c311[c] = entry
-    total = sum(d["total"] for d in per_bbl.values())
-    print(f"c311: {total} complaints w/ bbl, {matched} matched to a restaurant bbl, "
-          f"{len(c311)} camis touched")
-    return c311
+    total = sum(sum(d.values()) for d in per_bbl.values())
+    rod_matched = sum(1 for b in bbl_camis if b in rod_bbl)
+    print(f"c311: {total} food complaints w/ bbl ({matched} matched), "
+          f"{sum(rod_bbl.values())} rodent complaints w/ bbl ({rod_matched} restaurant "
+          f"buildings), {len(c311)} camis touched, {len(legend)} descriptors")
+    return c311, legend
 
 
 def build():
     today = datetime.datetime.now(datetime.timezone.utc).date()
     geo = {}      # camis -> [lat, lng]  (5-dp floats)
-    c311 = build_c311(today)  # camis -> {"n" or "bldg": int, "top": str}
+    c311, c311_legend = build_c311(today)  # camis -> {"n"/"bldg": int, "d": [[id, count]], "rod": int}
     lineage = {}  # camis -> {"prev": [...], "nearby": [...]}
 
     return {
         "meta": {
             "generated": today.isoformat(),
+            "c311_descriptors": c311_legend,  # "d" ids index into this
             "sources": {
                 "geo": len(geo),
                 "c311": len(c311),
