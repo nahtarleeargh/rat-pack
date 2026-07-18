@@ -18,18 +18,97 @@ Budget (measured at T6): < 2 MB raw / < 500 KB gzipped. Coords rounded to 5 dp.
 
 import datetime
 import json
+import time
 import urllib.parse
 import urllib.request
 
 OUT_PATH = "enrichment.json"
 API_311 = "https://data.cityofnewyork.us/resource/erm2-nwe9.json"
 API_INSP = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
+API_GEOSEARCH = "https://geosearch.planninglabs.nyc/v2/search"
 
 
 def soda(url, params):
     """One Socrata GET, JSON-decoded."""
     with urllib.request.urlopen(url + "?" + urllib.parse.urlencode(params), timeout=120) as r:
         return json.load(r)
+
+
+def geosearch(text):
+    """Top GeoSearch v2 hit for an address string, or None if it has none.
+
+    Retries twice on network errors, then raises: a persistent failure means
+    the service is down, and crashing the run (no commit, yesterday's file
+    stays live) beats committing a file whose geo section silently shrank.
+    """
+    qs = urllib.parse.urlencode({"text": text, "size": "1"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(API_GEOSEARCH + "?" + qs, timeout=30) as r:
+                feats = json.load(r).get("features") or []
+                return feats[0] if feats else None
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(2)
+
+
+def build_geo(today):
+    """Repaired coordinates for restaurants the dataset ships without (T4).
+
+    ~800 of ~31k camis have missing/zero lat-lng. Each gets one GeoSearch v2
+    lookup ("building street, boro, NY"); a hit is accepted only when its
+    confidence is >= 0.7 AND its borough or zip agrees with the dataset row —
+    the agreement gate is what kills Pelias fallback matches that land in the
+    wrong borough (e.g. a Central Park transverse "matched" to 65 St Brooklyn).
+    Rejects and no-results simply stay coordinate-less (off the map, as today).
+    Coords are rounded to 5 dp (~1 m) for the JSON budget and byte-stability.
+    """
+    rows = soda(API_INSP, {
+        "$select": "camis,max(building) as bldg,max(street) as street,"
+                   "max(boro) as boro,max(zipcode) as zip,"
+                   "max(latitude) as lat,max(longitude) as lng",
+        "$group": "camis",
+        "$limit": "50000",
+    })
+
+    def coordless(r):
+        try:
+            return float(r.get("lat", "")) == 0 or float(r.get("lng", "")) == 0
+        except ValueError:
+            return True
+
+    missing = sorted((r for r in rows if coordless(r)), key=lambda r: r["camis"])
+    geo = {}
+    stats = {"no_street": 0, "no_result": 0, "low_conf": 0, "disagree": 0}
+    for r in missing:
+        street = (r.get("street") or "").strip()
+        if not street:
+            stats["no_street"] += 1
+            continue
+        bldg = (r.get("bldg") or "").strip()
+        boro = (r.get("boro") or "").strip()
+        zip_ = (r.get("zip") or "").strip()
+        text = f"{bldg} {street}".strip() + (f", {boro}" if boro not in ("", "0") else "") + ", NY"
+        hit = geosearch(text)
+        time.sleep(0.05)  # politeness: public API, no key, daily cron
+        if hit is None:
+            stats["no_result"] += 1
+            continue
+        props = hit.get("properties", {})
+        if (props.get("confidence") or 0) < 0.7:
+            stats["low_conf"] += 1
+            continue
+        boro_ok = boro not in ("", "0") and (props.get("borough") or "").lower() == boro.lower()
+        zip_ok = zip_ != "" and (props.get("postalcode") or "") == zip_
+        if not (boro_ok or zip_ok):
+            stats["disagree"] += 1
+            continue
+        lng, lat = hit["geometry"]["coordinates"]
+        geo[r["camis"]] = [round(lat, 5), round(lng, 5)]
+    print(f"geo: {len(missing)} camis missing coords, {len(geo)} repaired, "
+          f"rejected {stats}")
+    return geo
 
 
 def build_c311(today):
@@ -124,7 +203,7 @@ def build_c311(today):
 
 def build():
     today = datetime.datetime.now(datetime.timezone.utc).date()
-    geo = {}      # camis -> [lat, lng]  (5-dp floats)
+    geo = build_geo(today)  # camis -> [lat, lng]  (5-dp floats)
     c311, c311_legend = build_c311(today)  # camis -> {"n"/"bldg": int, "d": [[id, count]], "rod": int}
     lineage = {}  # camis -> {"prev": [...], "nearby": [...]}
 

@@ -358,6 +358,7 @@ const ENRICHMENT_RAW_URL = 'https://raw.githubusercontent.com/nahtarleeargh/rat-
 const ENRICHMENT_LOCAL_URL = 'enrichment.json';
 const ENRICHMENT_MAX_AGE_DAYS = 60;  // older counts as missing
 let enrichment = null;               // consumers must null-check and ignore unknown keys
+let geoRepair = null;                // T4: city rows without coords, awaiting enrichment geo
 
 const GRADE_STATES = {
   A:       { label: 'A',                 color: 'var(--grade-a)' },
@@ -1160,10 +1161,7 @@ async function loadFullCity(attempt = 0) {
     const reopened = reopenedByCamis.get(r.camis);
     if (!reopened || r.closed_date > reopened) closedSet.add(r.camis);
   }
-  const full = new Map();
-  for (const r of restRows) {
-    const lat = parseFloat(r.lat), lng = parseFloat(r.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat === 0 || lng === 0) continue;
+  const makeRest = (r, lat, lng) => {
     const graded = latestGraded.get(r.camis);
     const rest = {
       camis: r.camis,
@@ -1182,14 +1180,45 @@ async function loadFullCity(attempt = 0) {
       reopenedDate: closedSet.has(r.camis) ? null : (reopenedByCamis.get(r.camis) ?? null),
     };
     rest.state = gradeState({ rawGrade: rest.rawGrade, latestInspectionDate: r.latest_date });
-    full.set(r.camis, rest);
+    return rest;
+  };
+  const full = new Map();
+  const noCoord = []; // T4: dataset rows without usable coords — enrichment geo may place them
+  for (const r of restRows) {
+    const lat = parseFloat(r.lat), lng = parseFloat(r.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat === 0 || lng === 0) {
+      noCoord.push(r);
+      continue;
+    }
+    full.set(r.camis, makeRest(r, lat, lng));
   }
 
   if (pinsAbort) pinsAbort.abort('superseded'); // any in-flight viewport fetch is obsolete
   restaurants = full;
   cityLoaded = true;
+  geoRepair = { rows: noCoord, make: makeRest };
+  applyGeoRepairs(); // enrichment usually lands first — repaired dots join before first city paint
   lastFetchCapped = false;
   buildMarkers();
+}
+
+// T4 geocoding repair: merge enrichment.geo coords into the city cache. The
+// city load stashes its coordinate-less rows in geoRepair; whichever of (city
+// cache, enrichment) lands second completes the merge, so repaired dots are in
+// place before first city paint or repainted right after. Only camis the city
+// query itself returned can appear — geo keys outside it are ignored. Returns
+// the number of entries added; idempotent (re-setting a camis is harmless).
+function applyGeoRepairs() {
+  if (!geoRepair || !cityLoaded || !enrichment?.geo) return 0;
+  let added = 0;
+  for (const r of geoRepair.rows) {
+    const g = enrichment.geo[r.camis];
+    if (!g) continue;
+    restaurants.set(r.camis, geoRepair.make(r, g[0], g[1]));
+    added++;
+  }
+  if (added) console.log(`enrichment: geo repaired coordinates for ${added} restaurants`);
+  return added;
 }
 
 function cssColor(v) {
@@ -1847,6 +1876,7 @@ async function loadEnrichment() {
     if (!Number.isFinite(ageDays) || ageDays > ENRICHMENT_MAX_AGE_DAYS) continue; // undated or stale = missing
     enrichment = data;
     console.log(`enrichment: loaded from ${url} (generated ${data.meta.generated})`);
+    if (applyGeoRepairs()) buildMarkers(); // T4: city cache beat us here — repaint with repaired dots
     return;
   }
   console.log('enrichment: none available — running as v1.2');
