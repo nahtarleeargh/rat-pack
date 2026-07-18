@@ -355,14 +355,19 @@ const FETCH_TIMEOUT_MS = 10000;
 const CITY_FETCH_TIMEOUT_MS = 30000;   // the big background fetch gets more patience
 const SENTINEL_NEVER = '1900-01-01T00:00:00.000';
 
-// v1.5 enrichment (SPEC §9): optional daily-merged data. Primary = the public
-// repo's raw file (the Actions cron refreshes it — data updates need no deploy);
-// fallback = the snapshot deployed next to this file; neither, or a file older
-// than the cutoff, means `enrichment` stays null and the app is exactly v1.2.
-const ENRICHMENT_RAW_URL = 'https://raw.githubusercontent.com/nahtarleeargh/rat-pack/main/enrichment.json';
+// v1.5 enrichment (SPEC §9): optional daily-merged data. Primary = the copy
+// served next to this page (on GitHub Pages that IS the repo's file, refreshed
+// by the daily Actions cron; same origin, so it usually beats the city queries
+// and the first paint is already snapped); fallback = the repo's raw file.
+// Neither, or a file older than the cutoff, means `enrichment` stays null and
+// the app is exactly v1.2.
 const ENRICHMENT_LOCAL_URL = 'enrichment.json';
+const ENRICHMENT_RAW_URL = 'https://raw.githubusercontent.com/nahtarleeargh/rat-pack/main/enrichment.json';
 const ENRICHMENT_MAX_AGE_DAYS = 60;  // older counts as missing
+const CITY_PAINT_GRACE_MS = 500;     // how long the first city paint waits for enrichment
 let enrichment = null;               // consumers must null-check and ignore unknown keys
+let enrichmentSettled = false;       // loadEnrichment finished (either outcome) — never hold a paint after this
+let cityPaintHold = null;            // release fn for a first city paint held for enrichment
 let geoRepair = null;                // T4: city rows without coords, awaiting enrichment geo
 let binSnap = null;                  // T6: bin -> [lat, lng], decoded once from enrichment.bins
 
@@ -375,9 +380,9 @@ const GRADE_STATES = {
   NEVER:   { label: 'Not yet inspected', color: 'var(--grade-none)' },
 };
 
-// Citywide median inspection score (V3), measured 2026-07-17: last 12 months of
-// letter-graded (A/B/C) cycle inspections, one row per inspection via
-// $group=camis,inspection_date,score — 13,404 inspections, median 11, quartiles 8–13.
+// Citywide median inspection score (V3), re-measured 2026-07-18 (v1.5 sweep): last 12
+// months of letter-graded (A/B/C) cycle inspections, one row per inspection via
+// $group=camis,inspection_date,score — 13,376 inspections, median 11, quartiles 8–13.
 // Re-measure at each version sweep; it drifts slowly.
 const CITY_MEDIAN_SCORE = 11;
 
@@ -1206,7 +1211,16 @@ async function loadFullCity(attempt = 0) {
   geoRepair = { rows: noCoord, make: makeRest };
   applyGeoRepairs(); // enrichment usually lands first — repaired dots join before first city paint
   lastFetchCapped = false;
-  buildMarkers();
+  // If enrichment is still in flight, hold this first citywide paint briefly:
+  // street-coord dots pile up near-coincident and read dark, and the snap
+  // repaint then visibly lightens the map (the "load flash"). A bounded wait
+  // yields one already-snapped paint; if enrichment stays slow or absent we
+  // paint anyway and the loader's repaint path takes over as before.
+  if (enrichmentSettled) buildMarkers();
+  else {
+    const timer = setTimeout(() => { cityPaintHold = null; buildMarkers(); }, CITY_PAINT_GRACE_MS);
+    cityPaintHold = () => { clearTimeout(timer); cityPaintHold = null; buildMarkers(); };
+  }
 }
 
 // T4 geocoding repair + T6 footprint snap: merge enrichment coords into the
@@ -1934,21 +1948,26 @@ function writeDeepLink(camis) {
 // generated date, staleness) just moves to the next rung — never an error the
 // user sees. On success `enrichment` holds the whole parsed file.
 async function loadEnrichment() {
-  for (const url of [ENRICHMENT_RAW_URL, ENRICHMENT_LOCAL_URL]) {
-    let data;
-    try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), cache: 'no-cache' });
-      if (!resp.ok) continue;
-      data = await resp.json();
-    } catch { continue; }
-    const ageDays = (Date.now() - Date.parse(data?.meta?.generated)) / 86400000;
-    if (!Number.isFinite(ageDays) || ageDays > ENRICHMENT_MAX_AGE_DAYS) continue; // undated or stale = missing
-    enrichment = data;
-    console.log(`enrichment: loaded from ${url} (generated ${data.meta.generated})`);
-    if (applyGeoRepairs()) buildMarkers(); // T4: city cache beat us here — repaint with repaired dots
-    return;
+  try {
+    for (const url of [ENRICHMENT_LOCAL_URL, ENRICHMENT_RAW_URL]) {
+      let data;
+      try {
+        const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), cache: 'no-cache' });
+        if (!resp.ok) continue;
+        data = await resp.json();
+      } catch { continue; }
+      const ageDays = (Date.now() - Date.parse(data?.meta?.generated)) / 86400000;
+      if (!Number.isFinite(ageDays) || ageDays > ENRICHMENT_MAX_AGE_DAYS) continue; // undated or stale = missing
+      enrichment = data;
+      console.log(`enrichment: loaded from ${url} (generated ${data.meta.generated})`);
+      break;
+    }
+    if (!enrichment) console.log('enrichment: none available — running as v1.2');
+  } finally {
+    enrichmentSettled = true;
+    if (cityPaintHold) { applyGeoRepairs(); cityPaintHold(); } // city cache is waiting on us — one snapped paint
+    else if (applyGeoRepairs()) buildMarkers(); // city painted before we settled (grace expired) — repaint snapped
   }
-  console.log('enrichment: none available — running as v1.2');
 }
 
 // ================= initial load =================
