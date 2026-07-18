@@ -18,6 +18,7 @@ Budget (measured at T6): < 2 MB raw / < 500 KB gzipped. Coords rounded to 5 dp.
 
 import datetime
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -201,11 +202,135 @@ def build_c311(today):
     return c311, legend
 
 
+# Address normalization for the lineage fallback key — mirrors index.html's
+# normAddr so both sides agree on what "same address" means: uppercase,
+# punctuation to spaces, ordinals stripped (1ST -> 1), abbreviations expanded.
+ADDR_ABBREV = {
+    "AVE": "AVENUE", "AV": "AVENUE", "ST": "STREET", "BLVD": "BOULEVARD",
+    "RD": "ROAD", "DR": "DRIVE", "PL": "PLACE", "PKWY": "PARKWAY",
+    "LN": "LANE", "CT": "COURT", "TER": "TERRACE", "SQ": "SQUARE",
+    "BWAY": "BROADWAY", "BDWY": "BROADWAY",
+    "E": "EAST", "W": "WEST", "N": "NORTH", "S": "SOUTH",
+}
+
+
+def norm_addr(s):
+    out = []
+    for w in re.sub(r"[^A-Z0-9 ]+", " ", str(s).upper()).split():
+        m = re.fullmatch(r"(\d+)(ST|ND|RD|TH)", w)
+        out.append(m.group(1) if m else ADDR_ABBREV.get(w, w))
+    return " ".join(out)
+
+
+def name_sim(a, b):
+    """Token Jaccard similarity between two establishment names (0..1)."""
+    ta = set(re.findall(r"[A-Z0-9]+", (a or "").upper()))
+    tb = set(re.findall(r"[A-Z0-9]+", (b or "").upper()))
+    return len(ta & tb) / len(ta | tb) if ta and tb else 0.0
+
+
+PREV_CAP = 3  # succession lines per camis; less-plausible ones fall to nearby
+
+
+def build_lineage(today):
+    """Predecessor / co-located links per restaurant (T5, SPEC section 9).
+
+    Groups camis by building: bin where present (placeholder "million" bins
+    like 3000000 rejected), else normalized building+street+boro. Within a
+    group, another permit whose inspections ALL ended before this one's began
+    (strict, no overlap; never-inspected sentinels have no dates and never
+    qualify) is a likely predecessor -> "prev", most plausible first (name
+    similarity boosts the ordering, then most recently seen; similarity is
+    never required). prev is capped at PREV_CAP: in big multi-tenant buildings
+    dozens of expired permits "predate" any new one, and those cross-storefront
+    guesses belong in the low-confidence bucket, not stacked as claims.
+    Everyone else at the location is the low-confidence "nearby" bucket, which
+    the SITE derives as group minus self minus prev: each group's member list
+    is stored once ("lgroups", entries point at it via "g") because per-member
+    neighbor lists repeat every camis k times in a k-permit building — measured
+    1.48 MB that way vs ~0.9 MB this way, against a 2 MB budget shared with
+    T6. Names ship once per camis in a top-level map, same reasoning as the
+    c311 descriptor legend. Nothing is dropped: every member of every group is
+    reachable from every other member's panel.
+    LINK, never merge: entries only reference other camis; each keeps its own
+    grades, history, and pin on the site.
+    """
+    rows = soda(API_INSP, {
+        "$select": "camis,max(dba) as name,max(bin) as bin_num,"
+                   "max(building) as bldg,max(street) as street,max(boro) as boro",
+        "$group": "camis",
+        "$limit": "50000",
+    })
+    # inspection span per camis, excluding the 1900-01-01 never-inspected sentinel
+    dates = soda(API_INSP, {
+        "$select": "camis,min(inspection_date) as fi,max(inspection_date) as li",
+        "$group": "camis",
+        "$where": "inspection_date > '1900-01-02'",
+        "$limit": "50000",
+    })
+    span = {r["camis"]: (r["fi"][:10], r["li"][:10]) for r in dates}
+
+    names = {}
+    groups = {}
+    fallback = 0
+    for r in rows:
+        camis = r["camis"]
+        names[camis] = (r.get("name") or "").strip() or "(unnamed)"
+        b = (r.get("bin_num") or "").strip()
+        if b and b[1:] != "000000":
+            key = "b:" + b
+        else:
+            addr = norm_addr((r.get("bldg") or "") + " " + (r.get("street") or ""))
+            boro = (r.get("boro") or "").strip().upper()
+            if not addr or boro in ("", "0"):
+                continue  # no usable location key at all
+            key = "a:" + boro + "|" + addr
+            fallback += 1
+        groups.setdefault(key, []).append(camis)
+
+    lineage = {}
+    lgroups = []
+    out_names = {}
+    prev_pairs = capped = 0
+    biggest = 0
+    for key in sorted(groups):
+        members = sorted(groups[key])
+        if len(members) < 2:
+            continue
+        biggest = max(biggest, len(members))
+        gi = len(lgroups)
+        lgroups.append(members)
+        for c in members:
+            out_names[c] = names[c]
+            c_first = span.get(c, (None, None))[0]
+            prev = []
+            if c_first:
+                prev = [o for o in members
+                        if o != c and span.get(o, (None, None))[1]
+                        and span[o][1] < c_first]
+            entry = {"g": gi}
+            if prev:
+                prev.sort(key=lambda o: (name_sim(names[c], names[o]) < 0.5,
+                                         -int(span[o][1].replace("-", "")), o))
+                if len(prev) > PREV_CAP:
+                    prev = prev[:PREV_CAP]
+                    capped += 1
+                entry["prev"] = [[o, span[o][1][:7]] for o in prev]
+                prev_pairs += len(prev)
+            lineage[c] = entry
+    print(f"lineage: {len(lgroups)} multi-permit locations ({fallback} camis keyed "
+          f"by address fallback), {len(lineage)} camis with entries, {prev_pairs} "
+          f"prev links ({capped} capped at {PREV_CAP}), biggest group {biggest}, "
+          f"{len(out_names)} names")
+    return lineage, lgroups, out_names
+
+
 def build():
     today = datetime.datetime.now(datetime.timezone.utc).date()
     geo = build_geo(today)  # camis -> [lat, lng]  (5-dp floats)
     c311, c311_legend = build_c311(today)  # camis -> {"n"/"bldg": int, "d": [[id, count]], "rod": int}
-    lineage = {}  # camis -> {"prev": [...], "nearby": [...]}
+    # camis -> {"prev": [[camis, "YYYY-MM"]], "g": index into lgroups}
+    lineage, lgroups, names = build_lineage(today)
 
     return {
         "meta": {
@@ -220,6 +345,8 @@ def build():
         "geo": geo,
         "c311": c311,
         "lineage": lineage,
+        "lgroups": lgroups,  # member lists stored once; entries point via "g"
+        "names": names,  # dba for every camis lineage references, stored once
     }
 
 

@@ -146,8 +146,13 @@
   .grade-line { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
   .grade-note { font-size: 12.5px; color: #555; }
   .grade-strip { display: flex; align-items: flex-start; gap: 4px; margin: 6px 0 2px; flex-wrap: wrap; }
-  .c311-box { background: #f6f7f9; border-radius: 8px; padding: 8px 10px; margin: 10px 0 0; font-size: 12.5px; color: #444; }
+  .c311-box, .lineage-box { background: #f6f7f9; border-radius: 8px; padding: 8px 10px; margin: 10px 0 0; font-size: 12.5px; color: #444; }
   .c311-head { font-size: 11px; color: #8a8f98; margin-bottom: 4px; }
+  .lineage-link { color: #1a6bb8; text-decoration: underline; cursor: pointer; }
+  .lineage-nearby { margin-top: 5px; }
+  .lineage-nearby summary { color: #888; font-size: 11.5px; cursor: pointer; user-select: none; list-style-position: inside; }
+  .lineage-nearby summary:hover { color: #555; }
+  .lineage-nearby .ln-list { margin-top: 4px; line-height: 1.8; }
   .c311-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
   .c311-tag { background: #e9ebef; border-radius: 10px; padding: 1px 8px; font-size: 11px; color: #555; }
   .c311-rod { margin-top: 5px; }
@@ -1435,6 +1440,40 @@ function c311Line(camis) {
   </div>`;
 }
 
+// T5 (v1.5): address lineage. merge.py groups permits by building (bin, with a
+// normalized-address fallback); a permit whose inspections all ended before this
+// one's began is a likely predecessor ("prev", at most 3, most plausible first).
+// Everyone else recorded at the location is the low-confidence bucket, derived
+// here as group minus self minus prev (the member list ships once in lgroups).
+// LINK, never merge: each camis keeps its own grade, pin, and history — the
+// links only open the other restaurant's panel.
+function fmtYM(ym) {
+  const [y, m] = ym.split('-');
+  return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m - 1] + ' ' + y;
+}
+function lineageBox(camis) {
+  const e = enrichment?.lineage?.[camis];
+  if (!e) return '';
+  const nm = c => enrichment.names?.[c] || restaurants.get(c)?.name || 'Unknown';
+  const link = c => `<a class="lineage-link" data-camis="${escapeHtml(c)}">${escapeHtml(nm(c))}</a>`;
+  const prev = (e.prev || [])
+    .map(([c, ym]) => `<div>Previously at this address: ${link(c)} (last seen ${fmtYM(ym)})</div>`)
+    .join('');
+  const prevSet = new Set((e.prev || []).map(p => p[0]));
+  const near = (enrichment.lgroups?.[e.g] || [])
+    .filter(c => c !== camis && !prevSet.has(c))
+    .sort((a, b) => nm(a).localeCompare(nm(b)) || a.localeCompare(b));
+  const nearby = near.length
+    ? `<details class="lineage-nearby"><summary>${near.length} other establishment${near.length === 1 ? '' : 's'} recorded at this address (may not be the same space)</summary>
+       <div class="ln-list">${near.map(link).join(' · ')}</div></details>`
+    : '';
+  if (!prev && !nearby) return '';
+  return `<div class="lineage-box">
+    <div class="c311-head">Address history · as of ${fmtDate(enrichment.meta.generated + 'T00:00:00')}</div>
+    ${prev}${nearby}
+  </div>`;
+}
+
 function renderPanel(r) {
   const badgeColor = cssColor(GRADE_STATES[r.state].color);
   const badgeText = ['A', 'B', 'C'].includes(r.state) ? r.state
@@ -1525,6 +1564,7 @@ function renderPanel(r) {
     </div>
     ${stripHtml}
     ${c311Line(r.camis)}
+    ${lineageBox(r.camis)}
     ${r.neverInspected
       ? '<div class="inspection">The city&#39;s dataset shows no inspection on record for this restaurant. Recent inspections can take a few days to appear, and re-permitted restaurants start a fresh record.</div>'
       : `<h3 style="font-size:14px;margin:14px 0 4px">Inspection history (${r.inspections.length})</h3>${inspHtml}`}
@@ -1538,6 +1578,8 @@ function renderPanel(r) {
       if (mates.length >= 2) openChooser(mates); // recompute — filter may have changed
     });
   }
+  panel.querySelectorAll('.lineage-link').forEach(a =>
+    a.addEventListener('click', () => selectRestaurant(a.dataset.camis)));
   panel.scrollTop = 0;
 }
 
