@@ -2,7 +2,7 @@
 
 A map of every NYC restaurant's health inspection grade and history, on one page.
 
-**Live at: https://rat-pack.netlify.app**
+**Live at: https://fatratmap.com**
 
 Tap any dot to see a restaurant's current grade, its full inspection history with
 plain-English explanations of what the inspector found, how its score compares to the
