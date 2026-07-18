@@ -6,7 +6,7 @@ Each v1.5 task fills in one section:
   T2: c311    - 311 food-safety complaint counts per restaurant / building
   T4: geo     - geocoded coordinates for restaurants missing them
   T5: lineage - predecessor / co-located establishment links
-  T6: geo     - coordinates snapped to building-footprint centroids
+  T6: bins    - building-footprint pin points, joined by bin on the site
 
 The site treats enrichment.json as optional: absent, invalid, or older than
 60 days means every enriched feature silently disappears (exact v1.2 behavior).
@@ -26,6 +26,7 @@ import urllib.request
 OUT_PATH = "enrichment.json"
 API_311 = "https://data.cityofnewyork.us/resource/erm2-nwe9.json"
 API_INSP = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
+API_FOOT = "https://data.cityofnewyork.us/resource/5zhs-2jue.json"
 API_GEOSEARCH = "https://geosearch.planninglabs.nyc/v2/search"
 
 
@@ -325,12 +326,146 @@ def build_lineage(today):
     return lineage, lgroups, out_names
 
 
+# ---- T6 footprint geometry helpers ----------------------------------------
+
+def ring_area(ring):
+    """Shoelace area of a closed ring (planar degrees^2 — only compared)."""
+    ox, oy = ring[0]  # local origin: raw lng/lat products lose ~100 m to float cancellation
+    a = 0.0
+    for i in range(len(ring) - 1):
+        a += (ring[i][0] - ox) * (ring[i+1][1] - oy) \
+           - (ring[i+1][0] - ox) * (ring[i][1] - oy)
+    return abs(a) / 2
+
+
+def area_centroid(ring):
+    """Area-weighted centroid of a closed ring -> (lng, lat)."""
+    ox, oy = ring[0]
+    a = cx = cy = 0.0
+    for i in range(len(ring) - 1):
+        x1, y1 = ring[i][0] - ox, ring[i][1] - oy
+        x2, y2 = ring[i+1][0] - ox, ring[i+1][1] - oy
+        cross = x1 * y2 - x2 * y1
+        a += cross
+        cx += (x1 + x2) * cross
+        cy += (y1 + y2) * cross
+    if a == 0:  # degenerate sliver: fall back to the vertex mean
+        pts = ring[:-1]
+        return (sum(p[0] for p in pts) / len(pts),
+                sum(p[1] for p in pts) / len(pts))
+    return cx / (3 * a) + ox, cy / (3 * a) + oy
+
+
+def point_in_ring(x, y, ring):
+    """Ray-cast point-in-polygon test against a closed ring."""
+    c = False
+    for i in range(len(ring) - 1):
+        x1, y1 = ring[i]
+        x2, y2 = ring[i+1]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            c = not c
+    return c
+
+
+def rep_point(ring):
+    """A point guaranteed on the footprint: the area centroid when it falls
+    inside, else the midpoint of the widest interior interval on the
+    horizontal line through it (concave L/U shapes push the centroid outside
+    the building — 254 of 21,269 restaurant bins measured at T6, Katz's
+    205 E Houston among them)."""
+    cx, cy = area_centroid(ring)
+    if point_in_ring(cx, cy, ring):
+        return cx, cy
+    xs = []
+    for i in range(len(ring) - 1):
+        x1, y1 = ring[i]
+        x2, y2 = ring[i+1]
+        if (y1 > cy) != (y2 > cy):
+            xs.append((x2 - x1) * (cy - y1) / (y2 - y1) + x1)
+    xs.sort()
+    if len(xs) < 2:
+        return cx, cy  # degenerate ring; keep the centroid
+    best = max(range(0, len(xs) - 1, 2), key=lambda i: xs[i+1] - xs[i])
+    return (xs[best] + xs[best+1]) / 2, cy
+
+
+BINS_ORIGIN = (40.4, -74.3)  # south-west of all NYC; offsets stay positive
+
+
+def build_bins(today):
+    """Building-footprint pin points for every restaurant bin (T6).
+
+    City coords are address points that sit a median ~30 m from the building
+    they belong to (measured at T6), so dots land on streets. This joins each
+    restaurant's bin to its footprint (5zhs-2jue) and ships one guaranteed-
+    on-the-building point per bin; the SITE joins by the bin it already has
+    in the city query and overrides coords wholesale, which also snaps T4's
+    street-geocoded repairs. Placeholder "million" bins and join misses ship
+    nothing (those keep their city coords).
+    Shape is three parallel arrays, not a keyed map: {"o": origin, "d":
+    sorted-bin deltas, "ll": interleaved 1e-5-deg offsets from origin} —
+    lat = o[0] + ll[2i]/1e5. Measured against the naive encodings: camis-
+    keyed floats +0.94 MB raw (busts the 2 MB budget), bin-keyed floats
+    +0.66 MB (busts the 500 KB gz budget); this one +0.31 MB raw / +121 KB
+    gz. Geometry is server-simplified (~1 m tolerance) — we only need one
+    interior point, and full rings are ~4x the download.
+    """
+    rows = soda(API_INSP, {
+        "$select": "camis,max(bin) as bin_num",
+        "$group": "camis",
+        "$limit": "50000",
+    })
+    with_bin = 0
+    bins = set()
+    for r in rows:
+        b = (r.get("bin_num") or "").strip()
+        if b and b[1:] != "000000":  # placeholder million bins carry no footprint
+            bins.add(b)
+            with_bin += 1
+    bins = sorted(bins)
+
+    rings_by_bin = {}  # bin -> [exterior ring, ...] (a bin can span structures)
+    for i in range(0, len(bins), 200):
+        chunk = bins[i:i + 200]
+        got = soda(API_FOOT, {
+            "$select": "bin,simplify(the_geom,0.00001) as g",
+            "$where": "bin in(" + ",".join(f"'{b}'" for b in chunk) + ")",
+            "$limit": "500",
+        })
+        for row in got:
+            g = row.get("g") or {}
+            for poly in g.get("coordinates", []):
+                ring = poly[0]
+                if ring and ring[0] != ring[-1]:
+                    ring = ring + [ring[0]]
+                if len(ring) >= 4:
+                    rings_by_bin.setdefault(row["bin"], []).append(ring)
+        time.sleep(0.05)  # politeness, same as the geocoding loop
+
+    d, ll = [], []
+    prev = 0
+    for b in sorted(rings_by_bin, key=int):
+        # biggest structure wins; full-ring tie-break keeps the pick
+        # independent of Socrata's row order (landmine: T3 determinism)
+        ring = max(rings_by_bin[b], key=lambda rg: (ring_area(rg), rg))
+        lng, lat = rep_point(ring)
+        d.append(int(b) - prev)
+        prev = int(b)
+        ll.append(round((lat - BINS_ORIGIN[0]) * 1e5))
+        ll.append(round((lng - BINS_ORIGIN[1]) * 1e5))
+    print(f"bins: {with_bin} camis with a real bin, {len(bins)} unique bins, "
+          f"{len(d)} footprint points shipped ({len(bins) - len(d)} bins with "
+          f"no footprint row)")
+    return {"o": list(BINS_ORIGIN), "d": d, "ll": ll}
+
+
 def build():
     today = datetime.datetime.now(datetime.timezone.utc).date()
     geo = build_geo(today)  # camis -> [lat, lng]  (5-dp floats)
     c311, c311_legend = build_c311(today)  # camis -> {"n"/"bldg": int, "d": [[id, count]], "rod": int}
     # camis -> {"prev": [[camis, "YYYY-MM"]], "g": index into lgroups}
     lineage, lgroups, names = build_lineage(today)
+    bins = build_bins(today)  # {"o", "d", "ll"} parallel arrays, bin -> footprint point
 
     return {
         "meta": {
@@ -340,6 +475,7 @@ def build():
                 "geo": len(geo),
                 "c311": len(c311),
                 "lineage": len(lineage),
+                "bins": len(bins["d"]),
             },
         },
         "geo": geo,
@@ -347,6 +483,7 @@ def build():
         "lineage": lineage,
         "lgroups": lgroups,  # member lists stored once; entries point via "g"
         "names": names,  # dba for every camis lineage references, stored once
+        "bins": bins,  # T6 footprint pin points, joined by bin on the site
     }
 
 

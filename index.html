@@ -364,6 +364,7 @@ const ENRICHMENT_LOCAL_URL = 'enrichment.json';
 const ENRICHMENT_MAX_AGE_DAYS = 60;  // older counts as missing
 let enrichment = null;               // consumers must null-check and ignore unknown keys
 let geoRepair = null;                // T4: city rows without coords, awaiting enrichment geo
+let binSnap = null;                  // T6: bin -> [lat, lng], decoded once from enrichment.bins
 
 const GRADE_STATES = {
   A:       { label: 'A',                 color: 'var(--grade-a)' },
@@ -1116,11 +1117,11 @@ async function loadFullCity(attempt = 0) {
   try {
     [restRows, gradeRows, closedRows, reopenRows] = await Promise.all([
       fetchRows({
-        // building/street/boro ride along for local search (U4) — same query, three
-        // more columns, no $where so alias reuse is safe (landmine #2 doesn't apply)
+        // building/street/boro ride along for local search (U4), bin for the T6
+        // footprint join — same query, no $where so alias reuse is safe (landmine #2)
         '$select': 'camis,max(dba) as dba,max(building) as bldg,max(street) as street,' +
                    'max(boro) as boro,max(latitude) as lat,max(longitude) as lng,' +
-                   'max(inspection_date) as latest_date',
+                   'max(bin) as bin_num,max(inspection_date) as latest_date',
         '$group': 'camis',
         '$limit': String(CITY_RESTAURANT_LIMIT),
       }, null, CITY_FETCH_TIMEOUT_MS),
@@ -1171,6 +1172,7 @@ async function loadFullCity(attempt = 0) {
     const rest = {
       camis: r.camis,
       name: r.dba || '(unnamed)',
+      bin: r.bin_num || null, // T6 footprint join key (placeholder bins simply miss the snap map)
       lat, lng,
       address: [r.bldg, r.street].filter(Boolean).join(' ') + (r.boro ? `, ${r.boro}` : ''),
       // precomputed search keys (U4): one uppercase pass now beats one per keystroke
@@ -1207,23 +1209,48 @@ async function loadFullCity(attempt = 0) {
   buildMarkers();
 }
 
-// T4 geocoding repair: merge enrichment.geo coords into the city cache. The
-// city load stashes its coordinate-less rows in geoRepair; whichever of (city
-// cache, enrichment) lands second completes the merge, so repaired dots are in
-// place before first city paint or repainted right after. Only camis the city
-// query itself returned can appear — geo keys outside it are ignored. Returns
-// the number of entries added; idempotent (re-setting a camis is harmless).
+// T4 geocoding repair + T6 footprint snap: merge enrichment coords into the
+// city cache. The city load stashes its coordinate-less rows in geoRepair and
+// enrichment.geo re-adds the ones it repaired (only camis the city query
+// itself returned can appear — geo keys outside it are ignored). Then every
+// restaurant whose bin has a footprint point in enrichment.bins gets its
+// coords overridden wholesale — city coords are address points a median
+// ~30 m off the building, and this includes the just-repaired T4 rows.
+// Whichever of (city cache, enrichment) lands second completes the merge, so
+// dots are right before first city paint or repainted right after. Returns
+// the number of entries changed; idempotent (second pass changes nothing).
 function applyGeoRepairs() {
-  if (!geoRepair || !cityLoaded || !enrichment?.geo) return 0;
-  let added = 0;
-  for (const r of geoRepair.rows) {
-    const g = enrichment.geo[r.camis];
-    if (!g) continue;
-    restaurants.set(r.camis, geoRepair.make(r, g[0], g[1]));
-    added++;
+  if (!cityLoaded || !enrichment) return 0;
+  let added = 0, snapped = 0;
+  if (geoRepair && enrichment.geo) {
+    for (const r of geoRepair.rows) {
+      const g = enrichment.geo[r.camis];
+      if (!g || restaurants.has(r.camis)) continue;
+      restaurants.set(r.camis, geoRepair.make(r, g[0], g[1]));
+      added++;
+    }
+  }
+  if (enrichment.bins) {
+    if (!binSnap) { // decode the parallel arrays once: sorted-bin deltas + 1e-5-deg offsets
+      const { o, d, ll } = enrichment.bins;
+      binSnap = new Map();
+      let b = 0;
+      for (let i = 0; i < d.length; i++) {
+        b += d[i];
+        binSnap.set(String(b), [o[0] + ll[2 * i] / 1e5, o[1] + ll[2 * i + 1] / 1e5]);
+      }
+    }
+    for (const rest of restaurants.values()) {
+      const s = rest.bin && binSnap.get(rest.bin);
+      if (!s || (rest.lat === s[0] && rest.lng === s[1])) continue;
+      rest.lat = s[0]; rest.lng = s[1];
+      rest.__p0x = rest.__p0y = undefined; // cached zoom-0 projection is stale now
+      snapped++;
+    }
   }
   if (added) console.log(`enrichment: geo repaired coordinates for ${added} restaurants`);
-  return added;
+  if (snapped) console.log(`enrichment: snapped ${snapped} dots onto building footprints`);
+  return added + snapped;
 }
 
 function cssColor(v) {
