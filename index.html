@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NYC Restaurant Inspection Map</title>
+<title>Fat Rat Map</title>
 <!-- V4 link-preview card. Site-wide, not per-restaurant: scrapers don't run JS,
      and there's no backend to serve per-camis HTML (documented limit, SPEC §7 V4). -->
-<meta name="description" content="Look up any NYC restaurant's health grade, inspection score, and full violation history, on a map. Live city data.">
-<meta property="og:title" content="Rat Pack: NYC restaurant grades, mapped">
-<meta property="og:description" content="Look up any NYC restaurant's health grade, inspection score, and full violation history, on a map. Live city data.">
+<meta name="description" content="Satisfy your nosy-ass desires and see what got caught in the city's restaurants.">
+<meta property="og:title" content="Fat Rat Map">
+<meta property="og:description" content="Satisfy your nosy-ass desires and see what got caught in the city's restaurants.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://fatratmap.com/">
 <meta property="og:image" content="https://fatratmap.com/og.png">
@@ -244,7 +244,7 @@
     max-width: 440px; width: calc(100vw - 40px); max-height: 85vh; overflow-y: auto;
     padding: 22px 24px; font-size: 14px; line-height: 1.55; text-align: left;
   }
-  #welcome .welcome-rat { font-size: 46px; text-align: center; line-height: 1; }
+  #welcome .welcome-rat { display: block; width: 55%; max-width: 220px; margin: 0 auto; border-radius: 10px; }
   #welcome h2 { margin: 8px 0 10px; font-size: 20px; text-align: center; }
   #welcome p { margin: 10px 0; }
   #welcome .welcome-link { color: #1d4ed8; text-decoration: underline; cursor: pointer; }
@@ -317,8 +317,8 @@
 
 <div id="welcome-backdrop">
   <div id="welcome">
-    <div class="welcome-rat">🐀</div>
-    <h2>Welcome to Rat Pack</h2>
+    <img class="welcome-rat" src="og.png" alt="Fat Rat Map">
+    <h2>Welcome to Fat Rat Map</h2>
     <p>NYC inspects every restaurant and publishes the results. This map shows all of it:
        every grade, every violation, updated daily from the city&rsquo;s data.</p>
     <p><strong>Before you panic:</strong> this is New York. Most kitchens have seen a fly
@@ -1926,7 +1926,7 @@ async function shareRestaurant(r) {
   const url = `${location.origin}${location.pathname}?camis=${encodeURIComponent(r.camis)}`;
   const mobile = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
   if (navigator.share && mobile) {
-    try { await navigator.share({ title: `${r.name} on Rat Pack`, url }); } catch (e) { /* user closed the sheet */ }
+    try { await navigator.share({ title: `${r.name} on Fat Rat Map`, url }); } catch (e) { /* user closed the sheet */ }
     return;
   }
   try {

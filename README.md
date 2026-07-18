@@ -1,4 +1,4 @@
-# Rat Pack 🐀
+# Fat Rat Map 🐀
 
 A map of every NYC restaurant's health inspection grade and history, on one page.
 
