@@ -1138,11 +1138,17 @@ async function loadFullCity(attempt = 0) {
         '$where': 'grade is not null',
         '$limit': String(CITY_GRADE_ROW_LIMIT),
       }, null, CITY_FETCH_TIMEOUT_MS),
-      // closure status: ~1.3k ever-closed + ~1.2k ever-re-opened rows citywide
+      // closure status: ~1.3k ever-closed + ~1.2k ever-re-opened rows citywide.
+      // closed_date folds in "re-closed by DOHMH" via lower() (a plain SoQL LIKE is
+      // case-sensitive and 're-closed' is lowercase). routine_date is the newest
+      // ordinary inspection — used to clear closures DOHMH reinstated without filing
+      // a re-open action (see 787 Coffee, camis 50107622).
       fetchRows({
-        '$select': 'camis,max(inspection_date) as closed_date',
+        '$select': "camis,max(case(lower(action) like '%closed by dohmh%', inspection_date)) as closed_date," +
+                   "max(case(action='Violations were cited in the following area(s).' or " +
+                   "action='No violations were recorded at the time of this inspection.', inspection_date)) as routine_date",
         '$group': 'camis',
-        '$where': "action like '%Closed by DOHMH%'",
+        '$having': 'closed_date is not null',
         '$limit': '20000',
       }, null, CITY_FETCH_TIMEOUT_MS),
       fetchRows({
@@ -1166,13 +1172,17 @@ async function loadFullCity(attempt = 0) {
     const cur = latestGraded.get(r.camis);
     if (!cur || r.graded_date > cur.graded_date) latestGraded.set(r.camis, r);
   }
-  // currently closed = newest closure strictly newer than newest re-opening
-  // (same-day tie → the re-opening wins, matching the panel banner's rule)
+  // currently closed = newest closure not yet superseded by either (a) a re-opening
+  // action on/after it, or (b) any routine inspection dated strictly after it. DOHMH
+  // sometimes reinstates a place without a re-open action, so a later routine
+  // inspection is the only signal (same-day tie → not closed, matching the panel).
   const reopenedByCamis = new Map(reopenRows.map(r => [r.camis, r.reopened_date]));
   const closedSet = new Set();
   for (const r of closedRows) {
     const reopened = reopenedByCamis.get(r.camis);
-    if (!reopened || r.closed_date > reopened) closedSet.add(r.camis);
+    if (reopened && reopened >= r.closed_date) continue;
+    if (r.routine_date && r.routine_date > r.closed_date) continue;
+    closedSet.add(r.camis);
   }
   const makeRest = (r, lat, lng) => {
     const graded = latestGraded.get(r.camis);
@@ -1397,18 +1407,26 @@ async function selectRestaurant(camis, opts = {}) {
   });
   const gradeIsStale = !!gradedRow && !first.grade && !neverInspected;
   const inspections = neverInspected ? [] : groupInspections(rows);
-  // Closed by DOHMH with no later re-opening. Look at the newest closure/re-open
-  // action; on a same-date tie the re-opening wins (it logically follows the closure).
-  const statusEvents = inspections.filter(i => /closed by dohmh|re-open/i.test(i.action || ''));
-  const newestStatusDate = statusEvents.length ? statusEvents[0].date : null;
-  const isClosed = statusEvents.length > 0 &&
-    !statusEvents.some(i => i.date === newestStatusDate && /re-open/i.test(i.action)) &&
-    /closed by dohmh/i.test(statusEvents.find(i => i.date === newestStatusDate).action);
+  // A DOHMH closure ("Closed by DOHMH" or "re-closed by DOHMH", both matched below)
+  // stands only until the establishment shows it is operating again: an explicit
+  // re-open action, OR any later routine inspection — DOHMH sometimes reinstates a
+  // place without filing a re-open action (see 787 Coffee, camis 50107622).
+  // inspections is sorted newest-first.
+  const closureEvents = inspections.filter(i => /closed by dohmh/i.test(i.action || ''));
+  const newestClosure = closureEvents.length ? closureEvents[0].date : null;
+  // same-day tie → the re-opening wins (it logically follows the closure); a routine
+  // inspection clears a closure only when strictly later, since the closure's own
+  // inspection cites violations on the same date.
+  const reopenedAfter = newestClosure &&
+    inspections.some(i => i.date >= newestClosure && /re-opened/i.test(i.action || ''));
+  const routineAfter = newestClosure &&
+    inspections.some(i => i.date > newestClosure && !/closed by dohmh|re-opened/i.test(i.action || ''));
+  const isClosed = !!newestClosure && !reopenedAfter && !routineAfter;
   // past closure, since re-opened: the newest re-open action (a re-open implies a
   // closure even when the closure row has aged out of the dataset window)
-  const newestReopen = !isClosed ? statusEvents.find(i => /re-open/i.test(i.action)) : null;
+  const newestReopen = !isClosed ? inspections.find(i => /re-opened/i.test(i.action || '')) : null;
   const reopenedDate = newestReopen ? newestReopen.date : null;
-  const priorClose = newestReopen ? statusEvents.find(i => /closed by dohmh/i.test(i.action)) : null;
+  const priorClose = newestReopen ? closureEvents[0] : null;
 
   // The panel's per-restaurant verdict is authoritative — sync it into the cache
   // so the map ring always agrees with the banner (and refresh the ring pass).
@@ -1431,7 +1449,7 @@ async function selectRestaurant(camis, opts = {}) {
     gradeIsStale,
     neverInspected,
     isClosed,
-    closedDate: isClosed ? newestStatusDate : null,
+    closedDate: isClosed ? newestClosure : null,
     reopenedDate,
     priorClosedDate: priorClose ? priorClose.date : null,
     inspections,
