@@ -88,8 +88,12 @@ def build_c311(today):
         bbl_camis.setdefault(b, []).append(r["camis"])
 
     # legend: descriptor strings stored once, ordered by citywide volume so
-    # ids are small and roughly stable day to day
-    legend = sorted(label_totals, key=label_totals.get, reverse=True)
+    # ids are small and roughly stable day to day. Every ordering below
+    # carries a deterministic tie-break: Socrata returns grouped rows in
+    # arbitrary per-request order, and any order leaking into the output
+    # makes the daily cron commit spurious byte-diffs (bit us at T3: 1,631
+    # entries reshuffled between two runs minutes apart)
+    legend = sorted(label_totals, key=lambda l: (-label_totals[l], l))
     idx = {label: i for i, label in enumerate(legend)}
 
     c311 = {}
@@ -105,7 +109,7 @@ def build_c311(today):
             matched += total
             entry["n" if len(camis_list) == 1 else "bldg"] = total
             entry["d"] = sorted(([idx[label], k] for label, k in food.items()),
-                                key=lambda p: -p[1])
+                                key=lambda p: (-p[1], p[0]))
         if rod:
             entry["rod"] = rod
         for c in camis_list:
@@ -143,7 +147,7 @@ def build():
 def main():
     data = build()
     with open(OUT_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, separators=(",", ":"), ensure_ascii=False)
+        json.dump(data, f, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
         f.write("\n")
     print(f"wrote {OUT_PATH} (generated {data['meta']['generated']}, "
           f"sources {data['meta']['sources']})")
