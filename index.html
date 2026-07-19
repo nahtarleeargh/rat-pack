@@ -6,6 +6,10 @@
 <title>Fat Rat Map</title>
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="favicon.png">
+<!-- Fonts: Figtree (body + all UI). The welcome-popup title ships pre-rendered
+     as title.png (was Rock Salt) so it can't font-swap-flash on cold load. -->
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;700&display=swap">
 <!-- V4 link-preview card. Site-wide, not per-restaurant: scrapers don't run JS,
      and there's no backend to serve per-camis HTML (documented limit, SPEC §7 V4). -->
 <meta name="description" content="Satisfy your nosy-ass desires and see what got caught in the city's restaurants.">
@@ -29,7 +33,16 @@
     --ui-bg: #ffffff;
     --ui-shadow: 0 2px 8px rgba(0,0,0,.25);
   }
-  html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  :root {
+    --font-body: "Figtree", system-ui, -apple-system, sans-serif;
+    --font-body-weight: 400;
+  }
+  html, body { height: 100%; margin: 0; font-family: var(--font-body); }
+  body { font-weight: var(--font-body-weight); }
+  button, input, select { font-family: inherit; } /* form controls don't inherit by default */
+  /* the heading (marker) font is scoped to the welcome-popup TITLE only; everything
+     else — detail panel, chooser, explainer, hover label, the popup button — is body */
+  .leaflet-tooltip { font-family: var(--font-body); } /* dot hover label = body font */
   #map { position: absolute; inset: 0; }
 
   /* --- floating search box (inert in T1, wired in T6) --- */
@@ -243,17 +256,20 @@
   #welcome-backdrop.open { display: flex; align-items: center; justify-content: center; }
   #welcome {
     background: var(--ui-bg); border-radius: 14px; box-shadow: var(--ui-shadow);
+    border: 8px solid #a7dca7;
+    box-sizing: border-box; /* padding inside the width, so phones keep real gutters */
     max-width: 440px; width: calc(100vw - 40px); max-height: 85vh; overflow-y: auto;
     padding: 22px 24px; font-size: 14px; line-height: 1.55; text-align: left;
   }
   #welcome .welcome-rat { display: block; width: 55%; max-width: 220px; margin: 0 auto; border-radius: 10px; }
-  #welcome h2 { margin: 8px 0 10px; font-size: 20px; text-align: center; }
+  #welcome h2 { margin: 8px 0 22px; text-align: center; }
+  #welcome h2 .welcome-title-img { display: block; margin: 0 auto; width: 324px; max-width: 100%; height: auto; }
   #welcome p { margin: 10px 0; }
   #welcome .welcome-link { color: #1d4ed8; text-decoration: underline; cursor: pointer; }
   #welcome-dismiss {
-    display: block; width: 100%; margin-top: 14px;
+    display: block; width: 100%; margin-top: 24px;
     border: none; border-radius: 8px; padding: 11px 0;
-    background: var(--grade-a); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+    background: #a7dca7; color: #14472a; font-size: 15px; font-weight: 600; cursor: pointer;
   }
   #welcome-dismiss:active { filter: brightness(.92); }
 
@@ -320,17 +336,15 @@
 <div id="welcome-backdrop">
   <div id="welcome">
     <img class="welcome-rat" src="og.png" alt="Fat Rat Map">
-    <h2>Welcome to Fat Rat Map</h2>
-    <p>NYC inspects every restaurant and publishes the results. This map shows all of it:
-       every grade, every violation, updated daily from the city&rsquo;s data.</p>
-    <p><strong>Before you panic:</strong> this is New York. Most kitchens have seen a fly
-       or two. An <strong>A</strong> doesn&rsquo;t mean spotless, and a pending grade
-       isn&rsquo;t a bad sign. The thing to actually avoid is a
-       <strong style="color:var(--grade-c)">red ring</strong>. That means the Health
-       Department shut the place down.</p>
-    <p><strong>Tap any dot</strong> to see what the inspector found.
-       <span class="welcome-link" id="welcome-explainer-link">What do the grades mean?</span></p>
-    <button id="welcome-dismiss">Show me the dots</button>
+    <h2><img class="welcome-title-img" src="title.png" alt="Welcome to Fat Rat Map" width="324" height="50"></h2>
+    <p>This fat rat is nosy and wants to know all the tea behind each NYC restaurant.
+       We love open data and so does NYC, so here&rsquo;s all that data laid out for
+       you to peruse at your leisure.</p>
+    <p><strong>CHILL LIL RAT.</strong> This is New York. Most violations aren&rsquo;t
+       critical or serious enough to shut a spot down&hellip;unless they actually got
+       shut down. Those spots have a
+       <strong style="color:var(--grade-c)">red ring</strong> around them.</p>
+    <button id="welcome-dismiss">I want my grubby paws on this data</button>
   </div>
 </div>
 
@@ -934,7 +948,10 @@ function filteredStackMembers(rest) {
 map.on('click', e => {
   const s = dotStyleForZoom(map.getZoom());
   const rest = hitTest(e.latlng, Math.max(s.radius, 8) + 3);
-  if (!rest) return;
+  if (!rest) { // clicked empty map: dismiss an open panel (same as the ✕)
+    if (panel.classList.contains('open')) closePanel();
+    return;
+  }
   const mates = filteredStackMembers(rest);
   if (mates.length >= 2) openChooser(mates); // U5b: never silently open one of N
   else selectRestaurant(rest.camis);
@@ -1879,29 +1896,20 @@ explainerBackdrop.addEventListener('click', e => {
   }
 });
 
-// ================= welcome popup (V1) =================
-// First visit only; a shared ?camis= link answers, it never onboards. Blocked
-// storage must never trap the user: fall back to once-per-session, fail open.
-const WELCOME_KEY = 'ratpack.welcomed';
+// ================= welcome popup (V1; amended 2026-07-19) =================
+// Greets EVERY page load (user call 2026-07-19; was first-visit-only via
+// localStorage). Deep links stay exempt: a shared ?camis= link answers, it
+// never onboards.
 const welcomeBackdrop = document.getElementById('welcome-backdrop');
-let welcomedThisSession = false;
 
 function shouldWelcome() {
-  if (deepLinkedCamis || welcomedThisSession) return false;
-  try { return localStorage.getItem(WELCOME_KEY) !== '1'; }
-  catch (e) { return true; } // storage blocked → show once per session
+  return !deepLinkedCamis;
 }
 function dismissWelcome() {
-  welcomedThisSession = true;
-  try { localStorage.setItem(WELCOME_KEY, '1'); } catch (e) { /* session fallback holds */ }
   welcomeBackdrop.classList.remove('open');
 }
 document.getElementById('welcome-dismiss').addEventListener('click', dismissWelcome);
 welcomeBackdrop.addEventListener('click', e => { if (e.target === welcomeBackdrop) dismissWelcome(); });
-document.getElementById('welcome-explainer-link').addEventListener('click', () => {
-  dismissWelcome();
-  explainerBackdrop.classList.add('open');
-});
 
 // ================= near me =================
 let youMarker = null;
@@ -1999,7 +2007,7 @@ async function loadEnrichment() {
   }
   loadFullCity(); // background; switches off per-pan fetching when it lands
   loadEnrichment(); // background; v1.5 data, absence changes nothing
-  if (shouldWelcome()) welcomeBackdrop.classList.add('open'); // V1: first visit only
+  if (shouldWelcome()) welcomeBackdrop.classList.add('open'); // greets every non-deep-link load
 }
 </script>
 </body>

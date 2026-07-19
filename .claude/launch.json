@@ -4,8 +4,8 @@
     {
       "name": "nyc-ratings",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8123"],
-      "port": 8123
+      "runtimeArgs": ["-c", "import os,http.server,socketserver; p=int(os.environ.get('PORT','8000')); socketserver.TCPServer(('',p),http.server.SimpleHTTPRequestHandler).serve_forever()"],
+      "autoPort": true
     }
   ]
 }
