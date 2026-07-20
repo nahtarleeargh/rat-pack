@@ -113,11 +113,15 @@
   /* --- near-me button --- */
   #nearme {
     position: absolute; top: 12px; right: 12px; z-index: 1000;
-    border: none; border-radius: 8px; padding: 10px 12px;
+    display: flex; align-items: center; gap: 6px;
+    border: none; border-radius: 8px; padding: 8px 12px;
     background: var(--ui-bg); box-shadow: var(--ui-shadow);
-    font-size: 14px; cursor: pointer;
+    font-family: inherit; font-size: 13px; font-weight: 600; color: #333;
+    cursor: pointer; transition: background .12s ease;
   }
-  #nearme:active { background: #eee; }
+  #nearme .nearme-pin { width: 15px; height: 15px; flex: none; color: #6aa06a; }
+  #nearme:hover { background: #f4f6f4; }
+  #nearme:active { background: #e9efe9; }
 
   /* --- legend --- */
   #legend {
@@ -130,6 +134,18 @@
   #legend .dot {
     width: 12px; height: 12px; border-radius: 50%; flex: none;
   }
+  #legend-header {
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    cursor: pointer; user-select: none;
+  }
+  #legend-header .legend-title { font-weight: 600; font-size: 12px; }
+  #legend-toggle {
+    border: none; background: none; cursor: pointer; color: #555;
+    font: inherit; font-size: 13px; line-height: 1; padding: 2px 3px; border-radius: 4px;
+  }
+  #legend-toggle:hover { background: rgba(0,0,0,.07); }
+  #legend-body { margin-top: 4px; }
+  #legend.collapsed #legend-body { display: none; }
 
   /* --- detail panel --- */
   #panel {
@@ -303,7 +319,12 @@
   <div id="suggestions"></div>
 </div>
 
-<div id="legend" title="Tap a grade to show only those restaurants">
+<div id="legend" class="collapsed" title="Tap a grade to show only those restaurants">
+  <div id="legend-header">
+    <span class="legend-title">Legend</span>
+    <button id="legend-toggle" aria-label="Expand legend" aria-expanded="false">&#9656;</button>
+  </div>
+  <div id="legend-body">
   <div class="row" data-states="A"><span class="dot" style="background:var(--grade-a)"></span>A</div>
   <div class="row" data-states="B"><span class="dot" style="background:var(--grade-b)"></span>B</div>
   <div class="row" data-states="C"><span class="dot" style="background:var(--grade-c)"></span>C</div>
@@ -313,6 +334,7 @@
   <div class="row"><span class="dot" style="background:transparent;border:2.5px solid var(--grade-c);width:8px;height:8px"></span>Closed by Health Dept</div>
   <div class="row"><span class="dot" style="background:transparent;border:2.5px dashed var(--reopened);width:8px;height:8px"></span>Closed in the past, re-opened</div>
   <div class="row explainer-link" id="explainer-link">What do grades mean?</div>
+  </div>
 </div>
 
 <div id="explainer-backdrop">
@@ -348,7 +370,7 @@
   </div>
 </div>
 
-<button id="nearme" title="Center the map on your location">📍 Near me</button>
+<button id="nearme" title="Center the map on your location"><svg class="nearme-pin" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 110-5 2.5 2.5 0 010 5z"/></svg>Near me</button>
 
 <div id="panel"></div>
 <div id="error-banner"></div>
@@ -662,28 +684,21 @@ function gradeState({ rawGrade, latestInspectionDate }) {
 }
 
 // ================= map bootstrap =================
-// U5: remember last view — device-only localStorage, consistent with the no-tracking
-// rule. A ?camis= deep link wins over the stored view (it will center its restaurant;
-// restoring a stale view first would just flash a wrong neighborhood).
-const LAST_VIEW_KEY = 'ratpack.lastView';
-const DEFAULT_VIEW = { center: [40.7295, -73.9880], zoom: 15 }; // East Village
+// A ?camis= deep link opens centered on its restaurant (focusSelected pans once the
+// row loads). Every other load opens Manhattan-centered (left-of-center) at the zoom
+// that frames the dense core, behind the welcome popup — a fresh overview each visit.
+const DEFAULT_VIEW = { center: [40.7295, -73.9880], zoom: 15 }; // East Village — deep-link placeholder
+const CITY_BOUNDS = L.latLngBounds([40.57, -74.04], [40.88, -73.70]); // dense core: Manhattan, Brooklyn, Queens
+const MANHATTAN_CENTER = [40.7457, -73.9480]; // first-view center (user-picked — Manhattan sits left-of-center)
 const deepLinkedCamis = (() => {
   const c = new URLSearchParams(location.search).get('camis');
   return c && /^\d{1,12}$/.test(c) ? c : null;
 })();
-function readLastView() {
-  try {
-    const v = JSON.parse(localStorage.getItem(LAST_VIEW_KEY) || 'null');
-    if (v && Number.isFinite(v.lat) && Number.isFinite(v.lng) && Number.isFinite(v.zoom) &&
-        Math.abs(v.lat) <= 90 && Math.abs(v.lng) <= 180 && v.zoom >= 3 && v.zoom <= 20) return v;
-  } catch (e) { /* blocked or corrupted storage → default view */ }
-  return null;
-}
-const lastView = deepLinkedCamis ? null : readLastView();
-const map = L.map('map', { zoomControl: true }).setView(
-  lastView ? [lastView.lat, lastView.lng] : DEFAULT_VIEW.center,
-  lastView ? lastView.zoom : DEFAULT_VIEW.zoom
-);
+const map = L.map('map', { zoomControl: true });
+if (deepLinkedCamis) map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
+// First view: Manhattan-centered, at the zoom that would frame the MBQ core (getBoundsZoom
+// tracks the viewport, so it stays consistent with the old fitBounds framing).
+else map.setView(MANHATTAN_CENTER, map.getBoundsZoom(CITY_BOUNDS));
 
 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
   maxZoom: 20,
@@ -948,7 +963,7 @@ function filteredStackMembers(rest) {
 map.on('click', e => {
   const s = dotStyleForZoom(map.getZoom());
   const rest = hitTest(e.latlng, Math.max(s.radius, 8) + 3);
-  if (!rest) { // clicked empty map: dismiss an open panel (same as the ✕)
+  if (!rest) { // clicked empty map: dismiss the panel, leaving the camera put
     if (panel.classList.contains('open')) closePanel();
     return;
   }
@@ -1307,22 +1322,8 @@ const panel = document.getElementById('panel');
 // (selectedCamis is declared up top with the pin-cache state — the renderer needs it)
 let panelAbort = null;
 
-// U5 "return ticket" (PRD §10 matrix): opening the panel from a pin tap saves the
-// pre-open view. Any user camera move (drag, zoom) or deliberate navigation (search
-// pick, near-me, deep link) tears the ticket up. Closing the panel reverts only
-// while a ticket is live — the map never rewinds a move the user made or asked for.
-let returnTicket = null;
-let autoMove = false; // a setView WE initiated is in flight — auto-pans must not tear the ticket
-function tearTicket() { returnTicket = null; }
-map.on('dragstart', tearTicket); // drags are always the user's (our animations never fire this)
-map.on('zoomstart', () => { if (!autoMove) tearTicket(); }); // wheel/pinch/dblclick/± buttons
-map.on('moveend', () => {
-  autoMove = false; // every programmatic move ends in exactly one moveend
-  try { // persist last view (U5) — device-only; storage failure = feature quietly off
-    const c = map.getCenter();
-    localStorage.setItem(LAST_VIEW_KEY, JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
-  } catch (e) {}
-});
+// Closing the panel (✕ or a click on the empty map) leaves the camera exactly
+// where it is — no rewind. Selecting a pin pans it into view but never snaps back.
 
 // Center the selected restaurant in the VISIBLE part of the map — above the
 // bottom sheet on phones, left of the side panel on wider screens.
@@ -1336,7 +1337,6 @@ function focusSelected(lat, lng, opts = {}) {
     p.x + (isSheet ? 0 : Math.min(400, size.x) / 2),  // side panel covers right 400px
     p.y + (isSheet ? size.y * 0.62 / 2 : 0)           // bottom sheet covers 62vh
   ), zoom);
-  autoMove = true; // panel-aware centering is an auto-pan — it must not tear the ticket
   // Hidden tabs never run requestAnimationFrame, and Leaflet's animated zoom silently
   // no-ops without it (the map just never moves — bites deep links opened in a
   // background tab). Nobody can see an animation in a hidden tab; jump instantly.
@@ -1382,12 +1382,6 @@ async function selectRestaurant(camis, opts = {}) {
   selectedCamis = camis;
   writeDeepLink(camis); // shareable URL for the selected restaurant
   updateSelectionMarker(); // highlight the selected pin
-  if (opts.center) {
-    tearTicket(); // deliberate navigation (search pick / deep link) — closing stays put
-  } else if (!panel.classList.contains('open')) {
-    returnTicket = { center: map.getCenter(), zoom: map.getZoom() }; // pin tap: issue the ticket
-  }
-  // pin taps while the panel is already open keep the original ticket state (matrix row 4)
   panel.classList.add('open');
   panel.innerHTML = '<div class="panel-loading">Loading inspection history…</div>';
 
@@ -1666,21 +1660,13 @@ function closePanel() {
   selectedCamis = null;
   writeDeepLink(null);
   updateSelectionMarker();
-  if (returnTicket) {
-    autoMove = true;
-    map.setView(returnTicket.center, returnTicket.zoom, { animate: document.visibilityState !== 'hidden' });
-  }
-  returnTicket = null;
+  // camera stays put — closing never moves the map
 }
 
 // ================= stacked-dot chooser (U5b) =================
 // Panel in "N places here" mode. Chooser mode selects nothing: no teardrop pin,
 // no dim, no ?camis= URL — those happen only when a specific restaurant is picked.
 function openChooser(members) {
-  // pin-tap camera semantics: issue the return ticket only if the panel was closed
-  if (!panel.classList.contains('open')) {
-    returnTicket = { center: map.getCenter(), zoom: map.getZoom() };
-  }
   if (panelAbort) panelAbort.abort('superseded'); // cancel any in-flight detail fetch
   selectedCamis = null;
   writeDeepLink(null);
@@ -1715,6 +1701,7 @@ function openChooser(members) {
     selectRestaurant(el.dataset.camis);
   });
   panel.scrollTop = 0;
+  focusSelected(members[0].lat, members[0].lng); // center the dot, matching a single-pin tap
 }
 
 // debounce pin loading on map movement (no-op once the city cache is loaded)
@@ -1874,6 +1861,18 @@ function closeSuggestions() { suggBox.classList.remove('open'); suggBox.innerHTM
 
 // ================= clickable-legend grade filter =================
 // (activeStates itself is declared up top, next to GRADE_STATES)
+// minimize / expand the legend (collapses to just the "Legend" header bar)
+(() => {
+  const legend = document.getElementById('legend');
+  const btn = document.getElementById('legend-toggle');
+  document.getElementById('legend-header').addEventListener('click', () => {
+    const collapsed = legend.classList.toggle('collapsed');
+    btn.innerHTML = collapsed ? '&#9656;' : '&#9662;'; // ▸ collapsed, ▾ expanded
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    btn.setAttribute('aria-label', collapsed ? 'Expand legend' : 'Minimize legend');
+  });
+})();
+
 document.querySelectorAll('#legend .row[data-states]').forEach(row => {
   row.addEventListener('click', () => {
     const states = row.dataset.states.split(',');
@@ -1928,7 +1927,6 @@ document.getElementById('nearme').addEventListener('click', () => {
       youMarker = L.circleMarker([latitude, longitude], {
         radius: 8, color: '#fff', weight: 2.5, fillColor: '#1d4ed8', fillOpacity: 1,
       }).addTo(map).bindTooltip('You are here');
-      tearTicket(); // near-me is deliberate navigation — closing the panel later stays here
       map.setView([latitude, longitude], Math.max(map.getZoom(), 16));
     },
     err => {
