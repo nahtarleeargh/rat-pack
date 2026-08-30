@@ -20,6 +20,7 @@ import datetime
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -30,29 +31,43 @@ API_FOOT = "https://data.cityofnewyork.us/resource/5zhs-2jue.json"
 API_GEOSEARCH = "https://geosearch.planninglabs.nyc/v2/search"
 
 
+def _get_json(url, timeout):
+    """One GET, JSON-decoded, with retries on transient upstream failures.
+
+    NYC's public APIs blip with 5xx/429 and connection drops a few times a
+    month; a single blip used to kill the whole daily run. We retry with
+    backoff, then re-raise: a *persistent* failure still crashes the run (no
+    commit, yesterday's file stays live) rather than commit shrunken data.
+    """
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            # 4xx other than rate-limiting is a real bug (bad query) — fail fast.
+            if e.code not in (429, 500, 502, 503, 504) or attempt == 4:
+                raise
+        except Exception:
+            if attempt == 4:
+                raise
+        time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s, 8s
+
+
 def soda(url, params):
-    """One Socrata GET, JSON-decoded."""
-    with urllib.request.urlopen(url + "?" + urllib.parse.urlencode(params), timeout=120) as r:
-        return json.load(r)
+    """One Socrata GET, JSON-decoded (retried on transient upstream errors)."""
+    return _get_json(url + "?" + urllib.parse.urlencode(params), timeout=120)
 
 
 def geosearch(text):
     """Top GeoSearch v2 hit for an address string, or None if it has none.
 
-    Retries twice on network errors, then raises: a persistent failure means
-    the service is down, and crashing the run (no commit, yesterday's file
-    stays live) beats committing a file whose geo section silently shrank.
+    Retries on transient errors, then raises: a persistent failure means the
+    service is down, and crashing the run (no commit, yesterday's file stays
+    live) beats committing a file whose geo section silently shrank.
     """
     qs = urllib.parse.urlencode({"text": text, "size": "1"})
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(API_GEOSEARCH + "?" + qs, timeout=30) as r:
-                feats = json.load(r).get("features") or []
-                return feats[0] if feats else None
-        except Exception:
-            if attempt == 2:
-                raise
-            time.sleep(2)
+    feats = _get_json(API_GEOSEARCH + "?" + qs, timeout=30).get("features") or []
+    return feats[0] if feats else None
 
 
 def build_geo(today):
