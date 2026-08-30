@@ -700,7 +700,10 @@ if (deepLinkedCamis) map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
 // tracks the viewport, so it stays consistent with the old fitBounds framing).
 else map.setView(MANHATTAN_CENTER, map.getBoundsZoom(CITY_BOUNDS));
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+// CARTO raster basemaps require an API key as of 2026-08 (free < 5M tiles/mo).
+// Basemap tile keys are necessarily public (they ride in the browser's tile
+// requests) — CARTO scopes abuse by referrer, so embedding it here is expected.
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=cb1_2cxz_1_b620c932f552d9bbbd916f69', {
   maxZoom: 20,
   subdomains: 'abcd',
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
